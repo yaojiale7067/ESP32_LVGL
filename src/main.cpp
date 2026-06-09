@@ -1,93 +1,30 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/queue.h>
-#include <WiFi.h>
 
 // 声明原有函数
 extern void original_setup();
 extern void original_loop();
+extern void SD_Task(void *pvParameters);   // SD 卡后台任务
 
-// 队列句柄（定义在 LVGL_Demos.cpp 中）
-extern QueueHandle_t ntpRequestQueue;
-extern QueueHandle_t wifiConfigQueue;
-
-// 消息结构
-typedef struct {
-    char ssid[64];
-    char password[64];
-} WifiConfigMsg_t;
-
-typedef struct {
-    bool request;
-} NTPRequestMsg_t;
-
-// LVGL 任务
+// LVGL 任务（负责所有 UI + SD 卡操作）
 void LVGL_Task(void *pvParameters) {
-    original_setup();
+    original_setup();                      // 执行原有 setup
     while (1) {
-        original_loop();
-        vTaskDelay(pdMS_TO_TICKS(5));
+        original_loop();                   // 执行原有 loop
+        vTaskDelay(pdMS_TO_TICKS(5));     // 保持原 loop 中的 delay 节奏
     }
-}
+} 
 
-// SD 卡后台任务（占位）
+// SD 卡后台任务（仅占位，不实际访问 SPI，避免冲突）
 void SD_Task(void *pvParameters) {
     Serial.println("[SD_Task] Running (idle)");
     while (1) {
+        // 这里可以放一些不涉及 SPI 的后台工作（例如处理队列消息）
+        // 如果你的应用需要独立写日志，请通过队列发送给 LVGL_Task 执行随便写的freertos lvgl 测试，可以读取SD卡
+        //
+    
         vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
-
-// WiFi 后台任务（负责执行连接和处理 NTP 请求）
-void WiFi_Task(void *pvParameters) {
-    Serial.println("[WiFi_Task] Starting...");
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
-    WifiConfigMsg_t cfg;
-    bool hasConfig = false;
-
-    // 配置 NTP（中国时区 UTC+8）
-    configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-
-    while (1) {
-        // 尝试从队列接收新的 WiFi 配置
-        if (xQueueReceive(wifiConfigQueue, &cfg, pdMS_TO_TICKS(100)) == pdTRUE) {
-            Serial.printf("[WiFi_Task] Received config: SSID=%s\n", cfg.ssid);
-            WiFi.disconnect(true);
-            WiFi.mode(WIFI_STA);
-            WiFi.begin(cfg.ssid, cfg.password);
-            hasConfig = true;
-        }
-
-        // 维持连接
-        if (hasConfig && WiFi.status() != WL_CONNECTED) {
-            static unsigned long lastReconnect = 0;
-            if (millis() - lastReconnect > 5000) {
-                Serial.println("[WiFi_Task] WiFi disconnected, reconnecting...");
-                WiFi.reconnect();
-                lastReconnect = millis();
-            }
-        }
-
-        // 处理 NTP 请求
-        NTPRequestMsg_t ntpMsg;
-        if (xQueueReceive(ntpRequestQueue, &ntpMsg, pdMS_TO_TICKS(0)) == pdTRUE) {
-            if (WiFi.status() == WL_CONNECTED) {
-                struct tm timeinfo;
-                if (getLocalTime(&timeinfo, 5000)) {
-                    char timeStr[64];
-                    strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
-                    Serial.printf("Current time: %s\n", timeStr);
-                } else {
-                    Serial.println("Failed to obtain NTP time.");
-                }
-            } else {
-                Serial.println("WiFi not connected, cannot get NTP time.");
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
@@ -95,26 +32,19 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
     Serial.println("\n========================================");
-    Serial.println("FreeRTOS System with WiFi Task");
+    Serial.println("FreeRTOS System");
     Serial.println("========================================");
 
-    // 创建队列
-    ntpRequestQueue = xQueueCreate(1, sizeof(NTPRequestMsg_t));
-    wifiConfigQueue = xQueueCreate(1, sizeof(WifiConfigMsg_t));
-    if (ntpRequestQueue == NULL || wifiConfigQueue == NULL) {
-        Serial.println("Failed to create queues!");
-    }
-
-    // 创建 LVGL 任务（核心 0）
+    // 创建 LVGL 任务（核心 0，优先级 3）
     xTaskCreatePinnedToCore(LVGL_Task, "LVGL", 16010, NULL, 3, NULL, 0);
-    // 创建 WiFi 任务（核心 1）
-    xTaskCreatePinnedToCore(WiFi_Task, "WiFi", 8192, NULL, 2, NULL, 1);
-    // 创建 SD 后台任务（核心 1）
+
+    // 创建 SD 后台任务（核心 1，优先级 1）
     xTaskCreatePinnedToCore(SD_Task, "SD", 4096, NULL, 1, NULL, 1);
 
-    Serial.println("All tasks created");
+    Serial.println("Tasks created");
 }
 
 void loop() {
+    // 空闲，所有工作由任务完成
     vTaskDelay(pdMS_TO_TICKS(1000));
 }
