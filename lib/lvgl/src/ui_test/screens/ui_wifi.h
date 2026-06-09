@@ -10,18 +10,25 @@
 extern "C" {
 #endif
 
-// SCREEN: ui_wifi
-extern void ui_wifi_screen_init(void);
-extern void ui_wifi_screen_destroy(void);
+#include "lvgl.h"
+
+// 屏幕对象
 extern lv_obj_t * ui_wifi;
-extern void ui_event_Button9(lv_event_t * e);
-extern lv_obj_t * ui_Button9;
-extern lv_obj_t * ui_Label13;
-// CUSTOM VARIABLES
+
+// UI 控件（供外部访问，用于绑定事件和更新内容）
+extern lv_obj_t * ui_WifiList;      // 用于显示 WiFi 列表的容器（实际是 List 对象）
+extern lv_obj_t * ui_PasswordArea;   // 密码输入框
+extern lv_obj_t * ui_ScanButton;     // 扫描按钮
+extern lv_obj_t * ui_ConnectButton;  // 连接按钮
+extern lv_obj_t * ui_BackButton;     // 返回按钮
+extern lv_obj_t * ui_StatusLabel;    // 状态标签
+
+// 屏幕初始化函数
+void ui_wifi_screen_init(void);
+void ui_wifi_screen_destroy(void);
 
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif
 
 #endif
-

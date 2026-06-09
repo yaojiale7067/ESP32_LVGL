@@ -1,14 +1,21 @@
 #include <FT6336.h>
 
- #define TOUCH_FT6336
- #define TOUCH_FT6336_SCL 25
- #define TOUCH_FT6336_SDA 32
- #define TOUCH_FT6336_INT -1
- #define TOUCH_FT6336_RST 33
- #define TOUCH_MAP_X1 0
- #define TOUCH_MAP_X2 240
- #define TOUCH_MAP_Y1 0
- #define TOUCH_MAP_Y2 320
+#define TOUCH_FT6336
+
+// ========== I2C 引脚（适配 ESP32-S3 N16R8） ==========
+// 原 ESP32 使用 SCL=25, SDA=32
+// ESP32-S3 建议使用 SCL=1, SDA=2 （或其他空闲 I2C 引脚）
+#define TOUCH_FT6336_SCL 1
+#define TOUCH_FT6336_SDA 2
+
+#define TOUCH_FT6336_INT -1
+#define TOUCH_FT6336_RST 42   // 复位引脚可保留 33（若冲突可改为 42 或 5）
+
+// 触摸映射范围（根据屏幕分辨率，保持不变）
+#define TOUCH_MAP_X1 0
+#define TOUCH_MAP_X2 240
+#define TOUCH_MAP_Y1 0
+#define TOUCH_MAP_Y2 320
 
 int touch_last_x = 0, touch_last_y = 0;
 unsigned short int width=0, height=0, rotation,min_x=0,max_x=0,min_y=0,max_y=0;
@@ -46,18 +53,8 @@ bool touch_touched(void)
    ts.read();
   if (ts.isTouched)
   {
-//#if defined(TOUCH_SWAP_XY)
-//    touch_last_x = map(ts.points[0].y, TOUCH_MAP_X1, TOUCH_MAP_X2, 0, width - 1);
-//    touch_last_y = map(ts.points[0].x, TOUCH_MAP_Y1, TOUCH_MAP_Y2, 0, height - 1);
-//#else
     touch_last_x = map(ts.points[0].x, min_x, max_x, 0, width - 1);
     touch_last_y = map(ts.points[0].y, min_y, max_y, 0, height - 1);
-//#endif
-    //Serial.print("x = ");
-    //Serial.print(touch_last_x);
-    //Serial.print(", y = ");
-    //Serial.print(touch_last_y);
-    //Serial.print("\r\n");
     return true;
   }
   else
