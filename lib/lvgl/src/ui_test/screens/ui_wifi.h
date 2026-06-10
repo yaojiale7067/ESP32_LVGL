@@ -7,14 +7,13 @@ extern "C" {
 
 #include "lvgl.h"
 
-// 这些变量名必须与 .c 文件中的定义完全一致
 extern lv_obj_t * ui_wifi;
-extern lv_obj_t * ui_WifiList;
-extern lv_obj_t * ui_PasswordArea;
-extern lv_obj_t * ui_ScanButton;
-extern lv_obj_t * ui_ConnectButton;
-extern lv_obj_t * ui_BackButton;
-extern lv_obj_t * ui_StatusLabel;
+extern lv_obj_t * ui_wifi_list;
+extern lv_obj_t * ui_wifi_password_ta;
+extern lv_obj_t * ui_wifi_scan_btn;
+extern lv_obj_t * ui_wifi_connect_btn;
+extern lv_obj_t * ui_wifi_back_btn;
+extern lv_obj_t * ui_wifi_status_label;
 
 void ui_wifi_screen_init(void);
 void ui_wifi_screen_destroy(void);
