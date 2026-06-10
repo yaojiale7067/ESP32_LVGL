@@ -5,7 +5,7 @@
 #define ILI9341_DRIVER
 
                     // Typical board default pins - change to match your board
-#define TFT_CS   34 //     10 or 34 (FSPI CS0) 
+#define TFT_CS   10 //     10 or 34 (FSPI CS0) 
 #define TFT_MOSI 35 //     11 or 35 (FSPI D)
 #define TFT_SCLK 36 //     12 or 36 (FSPI CLK)
 #define TFT_MISO 37 //     13 or 37 (FSPI Q)

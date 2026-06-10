@@ -24,7 +24,7 @@
 
 // Only ONE line below should be uncommented to define your setup.  Add extra lines and files as needed.
 
-#include <User_Setup.h>           // Default setup is root library folder
+//#include <User_Setup.h>           // Default setup is root library folder
 
 //#include <User_Setups/Setup1_ILI9341.h>  // Setup file for ESP8266 configured for my ILI9341
 //#include <User_Setups/Setup2_ST7735.h>   // Setup file for ESP8266 configured for my ST7735
@@ -93,7 +93,7 @@
 //#include <User_Setups/Setup66_Seeed_XIAO_Round.h>     // Setup file for Seeed XIAO with GC9A01 240x240
 
 //#include <User_Setups/Setup70_ESP32_S2_ILI9341.h>     // Setup file for ESP32 S2 with SPI ILI9341
-//#include <User_Setups/Setup70b_ESP32_S3_ILI9341.h>    // Setup file for ESP32 S3 with SPI ILI9341
+#include <User_Setups/Setup70b_ESP32_S3_ILI9341.h>    // Setup file for ESP32 S3 with SPI ILI9341
 //#include <User_Setups/Setup70c_ESP32_C3_ILI9341.h>    // Setup file for ESP32 C3 with SPI ILI9341
 //#include <User_Setups/Setup70d_ILI9488_S3_Parallel.h> // Setup file for ESP32 S3 with SPI ILI9488
 

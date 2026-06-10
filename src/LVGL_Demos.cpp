@@ -19,7 +19,7 @@
 #define WIFI_PASSWORD "4r9mec6e"
 
 /* ==================== 引脚定义 ==================== */
-#define DHTPIN  15
+#define DHTPIN  18
 #define DHTTYPE DHT11
 #define SD_CS   4
 
@@ -821,7 +821,7 @@ void show_json_editor(const char* path) {
 bool init_sd_card() {
     pinMode(SD_CS, OUTPUT);
     digitalWrite(SD_CS, HIGH);
-    sdSPI.begin(12, 13, 11, SD_CS);
+    sdSPI.begin(36, 37, 35, SD_CS);
     delay(10);
     if (!SD.begin(SD_CS, sdSPI)) {
         return false;
@@ -1171,7 +1171,7 @@ void original_setup() {
     
     pinMode(SD_CS, OUTPUT);
     digitalWrite(SD_CS, HIGH);
-    sdSPI.begin(12, 13, 11, SD_CS);
+    sdSPI.begin(36, 37, 35, SD_CS);
     if (!SD.begin(SD_CS, sdSPI)) {
         sd_initialized = false;
         Serial.println("SD Card Mount Failed!");

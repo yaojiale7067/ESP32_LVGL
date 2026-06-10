@@ -49,8 +49,7 @@
 #define LV_MEM_CUSTOM 0
 #if LV_MEM_CUSTOM == 0
     /*Size of the memory available for `lv_mem_alloc()` in bytes (>= 2kB)*/
-    #define LV_MEM_SIZE (75U * 1024U)          /*[bytes]*/
-    //#define LV_MEM_SIZE (128U * 1024U)  // 从 64KB 增至 128KB，减少内存分配耗时
+    #define LV_MEM_SIZE (128U * 1024U)          /*[bytes] 增加到128KB提升性能*/
     /*Set an address for the memory pool instead of allocating it as a normal array. Can be in external SRAM too.*/
     #define LV_MEM_ADR 0     /*0: unused*/
     /*Instead of an address give a memory allocator that will be called to get a memory pool for LVGL. E.g. my_malloc*/
@@ -78,7 +77,7 @@
  *====================*/
 
 /*Default display refresh period. LVG will redraw changed areas with this period time*/
-#define LV_DISP_DEF_REFR_PERIOD 5      /*[ms]*/
+#define LV_DISP_DEF_REFR_PERIOD 30      /*[ms] 原5ms过快，改为30ms降低无效刷新*/
 
 /*Input device read period in milliseconds*/
 #define LV_INDEV_DEF_READ_PERIOD 30     /*[ms]*/
@@ -114,7 +113,7 @@
     /*Allow buffering some shadow calculation.
     *LV_SHADOW_CACHE_SIZE is the max. shadow size to buffer, where shadow size is `shadow_width + radius`
     *Caching has LV_SHADOW_CACHE_SIZE^2 RAM cost*/
-    #define LV_SHADOW_CACHE_SIZE 0
+    #define LV_SHADOW_CACHE_SIZE 8      /*原0，改为8，缓存小阴影提升滑动流畅度*/
 
     /* Set number of maximally cached circle data.
     * The circumference of 1/4 circle are saved for anti-aliasing
@@ -138,8 +137,8 @@
  */
 //#define LV_LAYER_SIMPLE_BUF_SIZE          (24 * 1024)
 //#define LV_LAYER_SIMPLE_FALLBACK_BUF_SIZE (3 * 1024)
-#define LV_LAYER_SIMPLE_BUF_SIZE          (32 * 1024)
-#define LV_LAYER_SIMPLE_FALLBACK_BUF_SIZE (8 * 1024)
+#define LV_LAYER_SIMPLE_BUF_SIZE          (64 * 1024)   /*原32KB，增至64KB*/
+#define LV_LAYER_SIMPLE_FALLBACK_BUF_SIZE (16 * 1024)   /*原8KB，增至16KB*/
 /*Default image cache size. Image caching keeps the images opened.
  *If only the built-in image formats are used there is no real advantage of caching. (I.e. if no new image decoder is added)
  *With complex image decoders (e.g. PNG or JPG) caching can save the continuous open/decode of images.
