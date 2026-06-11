@@ -48,11 +48,9 @@ void WiFi_Task(void *pvParameters) {
     Serial.println("[WiFi_Task] Starting...");
     vTaskDelay(pdMS_TO_TICKS(3000));
 
-    // ========== 使用硬编码凭据自动连接 ==========
     Serial.printf("[WiFi_Task] Connecting to fixed SSID: %s\n", FIXED_SSID);
     WiFi.mode(WIFI_STA);
     WiFi.begin(FIXED_SSID, FIXED_PASSWORD);
-    // =========================================
 
     WifiConfigMsg_t cfg;
     bool hasConfig = true;   // 已经启动了连接
