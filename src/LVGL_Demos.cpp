@@ -999,7 +999,7 @@ void wifi_connect_to_selected() {
 
 void print_system_info() {
     Serial.println("\n========================================");
-    Serial.println("            SYSTEM INFORMATION");
+    Serial.println("            SYSTEM INFO");
     Serial.println("========================================");
     Serial.printf("  Chip:        %s\n", ESP.getChipModel());
     Serial.printf("  Cores:       %d\n", ESP.getChipCores());
@@ -1053,7 +1053,7 @@ void process_serial_command(String cmd) {
     else if (cmd == "/fetch") {
         print_system_info();
     }
-    else if (cmd == "date") {
+    else if (cmd == "/date") {
         get_ntp_time();
     }
     else {
@@ -1070,7 +1070,7 @@ void check_ui_controls() {
     Serial.println("Commands:");
     Serial.println("  //dht11 profile start / stop / status");
     Serial.println("  /fetch   - Print system info");
-    Serial.println("  date     - Get NTP time (if WiFi connected)");
+    Serial.println("  /date     - Get NTP time (if WiFi connected)");
 }
 
 void original_setup() {

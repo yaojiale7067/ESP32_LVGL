@@ -7,12 +7,9 @@
 extern void original_setup();
 extern void original_loop();
 
-// ========== 硬编码 WiFi 凭据（请修改为您自己的） ==========
 #define FIXED_SSID     "ChinaNet-qMyM"
 #define FIXED_PASSWORD "4r9mec6e"
-// =======================================================
 
-// 队列句柄定义（全局唯一）
 QueueHandle_t wifiConfigQueue = NULL;
 QueueHandle_t wifiScanRequestQueue = NULL;
 QueueHandle_t wifiScanResultQueue = NULL;

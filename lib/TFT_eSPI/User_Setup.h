@@ -58,7 +58,7 @@
 // Section 4. 其他选项（保持不变）
 // ##################################################################################
 
-#define SPI_FREQUENCY   60000000   // 40 MHz（如果稳定可使用 60/80 MHz）
+#define SPI_FREQUENCY   80000000   // 40 MHz（如果稳定可使用 60/80 MHz）
 #define SPI_READ_FREQUENCY  80000000
 #define SPI_TOUCH_FREQUENCY  2500000
 
