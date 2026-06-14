@@ -103,7 +103,7 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
     Serial.println("\n========================================");
-    Serial.println("FreeRTOS System with WiFi Task");
+    Serial.println("FreeRTOS System Start");
     Serial.println("========================================");
 
     wifiConfigQueue = xQueueCreate(1, sizeof(WifiConfigMsg_t));

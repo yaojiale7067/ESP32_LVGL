@@ -15,8 +15,8 @@
 #include "touch.h"
 #include "ui_test/ui.h"
 #include "ui_test/screens/ui_wifi.h"
-
-#define DHTPIN  18
+#include <esp_system.h>
+#define DHTPIN  7
 #define DHTTYPE DHT11
 #define SD_CS   4
 
@@ -60,12 +60,12 @@ static bool dht11_logging = false;
 static unsigned long last_log_time = 0;
 static const unsigned long LOG_INTERVAL = 3000;
 
-// 队列句柄声明（定义在 main.cpp 中）
+// 队列句柄声明
 extern QueueHandle_t wifiConfigQueue;
 extern QueueHandle_t wifiScanRequestQueue;
 extern QueueHandle_t wifiScanResultQueue;
 
-// 消息结构（与 main.cpp 一致）
+// 消息结构
 typedef struct {
     char ssid[64];
     char password[64];
@@ -1040,20 +1040,23 @@ void get_ntp_time() {
 
 void process_serial_command(String cmd) {
     cmd.trim();
-    if (cmd == "//dht11 profile start") {
+    if (cmd == "/dht11 profile start") {
         start_dht11_logging();
     }
-    else if (cmd == "//dht11 profile stop") {
+    else if (cmd == "/dht11 profile stop") {
         stop_dht11_logging();
     }
-    else if (cmd == "//dht11 status") {
+    else if (cmd == "/dht11 status") {
         if (dht11_logging) Serial.println("DHT11 logging is ACTIVE.");
         else Serial.println("DHT11 logging is STOPPED.");
     }
-    else if (cmd == "/fetch") {
+    else if (cmd == "fetch") {
         print_system_info();
     }
-    else if (cmd == "/date") {
+    else if (cmd == "reboot") {
+        esp_restart();
+    }
+    else if (cmd == "date") {
         get_ntp_time();
     }
     else {
@@ -1068,9 +1071,10 @@ void check_ui_controls() {
     Serial.printf("ui_Labelrh: %p\n", ui_Labelrh);
     Serial.printf("ui_file: %p\n", ui_file);
     Serial.println("Commands:");
-    Serial.println("  //dht11 profile start / stop / status");
-    Serial.println("  /fetch   - Print system info");
-    Serial.println("  /date     - Get NTP time (if WiFi connected)");
+    Serial.println("  /dht11 profile start $ stop $ status");
+    Serial.println("  fetch   - Print system info");
+    Serial.println("  date    - Get NTP time (if WiFi connected)");
+    Serial.println("  reboot  - Reboot the FreeRTOS");
 }
 
 void original_setup() {
@@ -1152,10 +1156,9 @@ void original_setup() {
 
     ui_wifi_screen_init();
 
-    // 绑定业务逻辑
+    
     lv_obj_add_event_cb(ui_wifi_scan_btn, [](lv_event_t* e) { wifi_scan_networks(); }, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(ui_wifi_connect_btn, [](lv_event_t* e) { wifi_connect_to_selected(); }, LV_EVENT_CLICKED, NULL);
-    // 返回按钮已在 UI 中处理，无需额外绑定
 
     if (ui_dht11 != NULL) {
         lv_scr_load(ui_dht11);
