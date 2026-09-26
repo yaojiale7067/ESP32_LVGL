@@ -11,8 +11,8 @@
 // User defined information reported by "Read_User_Setup" test & diagnostics example
 #define USER_SETUP_INFO "User_Setup"
 #define ILI9341_DRIVER       // 使用 ILI9341 驱动（根据您的屏幕实际修改）
-#define TFT_BL   21
 #define TFT_BACKLIGHT_ON HIGH
+#define TFT_BL   21
 #define TFT_MISO 13   // 原 ESP32 为 12，ESP32-S3 可用 13
 #define TFT_MOSI 11   // 原 ESP32 为 13，ESP32-S3 可用 11
 #define TFT_SCLK 12   // 原 ESP32 为 14，ESP32-S3 可用 12

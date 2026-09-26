@@ -232,21 +232,33 @@
     *LV_LOG_LEVEL_ERROR       Only critical issue, when the system may fail
     *LV_LOG_LEVEL_USER        Only logs added by the user
     *LV_LOG_LEVEL_NONE        Do not log anything*/
-    #define LV_LOG_LEVEL LV_LOG_LEVEL_TRACE
+    /* 注意：这里原本是 LV_LOG_LEVEL_TRACE。LVGL 会把文字传给用户注册的
+     * print_cb；如果同时把等级设成 TRACE，串口会被 lv_mem_alloc / event_send
+     * 之类的内部日志刷爆（而且 LVGL 私有的 "%pV" 格式符一旦没走到它自己的
+     * lv_snprintf 实现，就会输出被截断的乱码行）。
+     * 默认只保留 WARN 及以上：真出问题能在串口看到，平时安静。
+     * 需要深度排查时再临时改成 LV_LOG_LEVEL_TRACE，
+     * 并按需打开下面某一个 LV_LOG_TRACE_xxx（不要 8 个全开）。
+     */
+    #define LV_LOG_LEVEL LV_LOG_LEVEL_WARN
 
     /*1: Print the log with 'printf';
     *0: User need to register a callback with `lv_log_register_print_cb()`*/
+    /* 关键：保持 0。为 1 时 LVGL 会直接调用 printf()，对 USB-CDC 串口
+     * 控制台完全无效；我们改用 lv_log_register_print_cb(my_print)。
+     * 如果 my_print 没被注册（或 LV_LOG_LEVEL 为 NONE），日志就静默丢弃。*/
     #define LV_LOG_PRINTF 0
 
     /*Enable/disable LV_LOG_TRACE in modules that produces a huge number of logs*/
-    #define LV_LOG_TRACE_MEM        1
-    #define LV_LOG_TRACE_TIMER      1
-    #define LV_LOG_TRACE_INDEV      1
-    #define LV_LOG_TRACE_DISP_REFR  1
-    #define LV_LOG_TRACE_EVENT      1
-    #define LV_LOG_TRACE_OBJ_CREATE 1
-    #define LV_LOG_TRACE_LAYOUT     1
-    #define LV_LOG_TRACE_ANIM       1
+    /* 这些只在 LV_LOG_LEVEL_TRACE 时才有意义；显式关掉，避免以后误开 TRACE 刷屏 */
+    #define LV_LOG_TRACE_MEM        0
+    #define LV_LOG_TRACE_TIMER      0
+    #define LV_LOG_TRACE_INDEV      0
+    #define LV_LOG_TRACE_DISP_REFR  0
+    #define LV_LOG_TRACE_EVENT      0
+    #define LV_LOG_TRACE_OBJ_CREATE 0
+    #define LV_LOG_TRACE_LAYOUT     0
+    #define LV_LOG_TRACE_ANIM       0
 
 #endif  /*LV_USE_LOG*/
 
