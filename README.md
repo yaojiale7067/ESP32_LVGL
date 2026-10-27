@@ -73,13 +73,6 @@
 > 内容是本项目的实现。**如果用 SquareLine Studio 重新导出，会把这些屏覆盖掉**，
 > 需要重新套用 `ui_kit`。`ui_ble.c` / `ui_kit.c` 不在 SquareLine 工程里，不受影响。
 
-### 维护提醒：BLE 的两把锁必须用临界区，不能用互斥量
-`ble_ring_push()` 的执行者是 Bluedroid 的 BTC 任务（优先级 19），
-而消费者是 LVGL 任务（优先级 3）。FreeRTOS 互斥量只适合"高优先级等低优先级"
-这一种方向，反方向使用会在 `xTaskPriorityDisinherit` 里断言失败，
-直接在蓝牙协议栈里 panic。因此环形缓冲 `g_bleRxMux` 和接收显示缓冲
-`rx_disp_mux` 都用 `portMUX_TYPE` + `portENTER_CRITICAL()`，
-里面只做几微秒的内存拷贝，**不要**在临界区里调用 `Serial.print` / LVGL API。
 
 ## 串口命令
 | 命令 | 作用 |
@@ -90,4 +83,4 @@
 | `reboot` | 重启 |
 | `help` | 命令列表 |
 
-（命令不区分大小写，带不带前导 `/` 都可以。）
+
