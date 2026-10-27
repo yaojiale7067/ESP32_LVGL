@@ -62,13 +62,16 @@ static void go_ble_cb(lv_event_t * e)
 }
 #endif
 
-// ---- 菜单几何：5 行，行高 32，间距 4 ----
-#define MENU_X      16
-#define MENU_W      (UIK_W - 2 * MENU_X)      // 288
-#define MENU_Y0     56
+// ---- 菜单几何：行高 32，间距和屏幕边距都用统一的缝隙值 ----
+// 原来 MENU_X 写死 16、MENU_Y0 写死 56（顶着标题条），和全屏统一后的
+// 缝隙(4)都不一致。现在标题条高度和菜单起点都从统一值推导。
+#define MENU_X      UIK_PANEL_GAP               // 4（= 左右边距，和面板缝隙同一个值）
+#define MENU_W      (UIK_W - 2 * MENU_X)        // 312
+#define TITLEBAR_H  (UIK_CONTENT_Y + 8)         // 46：顶部标题条高度
+#define MENU_Y0     (TITLEBAR_H + UIK_PANEL_GAP) // 50：标题条下沿 + 一个缝隙
 #define MENU_ROW_H  32
-#define MENU_GAP    4
-#define MENU_STEP   (MENU_ROW_H + MENU_GAP)   // 36
+#define MENU_GAP    UIK_PANEL_GAP               // 4（行间距）
+#define MENU_STEP   (MENU_ROW_H + MENU_GAP)     // 36
 
 void ui_Screen1_screen_init(void)
 {
@@ -76,7 +79,7 @@ void ui_Screen1_screen_init(void)
 
     // 标题区（主菜单没有"返回"，顶栏只放标题）
     lv_obj_t * bar = lv_obj_create(ui_Screen1);
-    lv_obj_set_size(bar, UIK_W, UIK_CONTENT_Y + 8);
+    lv_obj_set_size(bar, UIK_W, TITLEBAR_H);
     lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_set_style_bg_color(bar, lv_color_hex(UIK_C_BG), LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(bar, 0, LV_STATE_DEFAULT);
@@ -130,8 +133,11 @@ void ui_Screen1_screen_init(void)
 #endif
 
     // ---- 左下角版本号（原 ui_Label11）----
-    ui_Label11 = uik_label(ui_Screen1, "lvgl v8.3.6", UIK_PAD, UIK_H - 16,
+    // 贴在左下角，和屏幕边距同一个缝隙值。
+    // 状态条的提示文字是居中的，所以这里左对齐不会打架。
+    ui_Label11 = uik_label(ui_Screen1, "lvgl v8.3.6", MENU_X, 0,
                            UIK_C_TEXT_DIM, UIK_FONT_HINT, LV_TEXT_ALIGN_LEFT);
+    lv_obj_align(ui_Label11, LV_ALIGN_BOTTOM_LEFT, MENU_X, -MENU_X);
 
     uic_Screen1 = ui_Screen1;
 }

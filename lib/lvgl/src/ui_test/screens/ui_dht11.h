@@ -21,6 +21,9 @@ extern lv_obj_t * ui_Label4;
 extern lv_obj_t * ui_Label10;
 extern lv_obj_t * ui_Labelrh;
 extern lv_obj_t * ui_Labeltemp;
+extern lv_obj_t * ui_dht11_clock;      // 底部时间显示（东八区）
+extern lv_obj_t * ui_dht11_chip;       // ESP32 片内温度数值标签
+extern lv_obj_t * ui_PanelChip;        // ESP32 片内温度卡片外框
 extern void ui_event_Button7(lv_event_t * e);
 extern lv_obj_t * ui_Button7;
 extern lv_obj_t * ui_Label8;

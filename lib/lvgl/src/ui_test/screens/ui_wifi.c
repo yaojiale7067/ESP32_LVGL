@@ -1,4 +1,5 @@
 #include "ui_wifi.h"
+#include "../ui.h"       // ui_Screen1 / ui_Screen1_screen_init / _ui_screen_change
 #include "../ui_kit.h"
 
 lv_obj_t * ui_wifi = NULL;
@@ -36,12 +37,15 @@ static void password_defocus_cb(lv_event_t * e) {
     }
 }
 
-// 返回按钮：加载主屏幕（假设主屏幕是 ui_dht11）
+// 返回按钮：回主菜单（标题 "ESP32-S3 TEST"，即 ui_Screen1）
+// 原来这里直接 lv_scr_load(ui_dht11)，跳到温湿度屏去了 —— 和其它屏的
+// 返回行为不一致（其它屏都是回 ui_Screen1）。
+// 用 _ui_screen_change 而不是裸 lv_scr_load：前者在目标屏还没建时会调用
+// ui_Screen1_screen_init() 兜底创建，裸 load 碰上 NULL 会白屏。
 static void back_btn_ui_cb(lv_event_t * e) {
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_CLICKED) {
-        extern lv_obj_t * ui_dht11;
-        if (ui_dht11) lv_scr_load(ui_dht11);
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        _ui_screen_change(&ui_Screen1, LV_SCR_LOAD_ANIM_NONE, 0, 0,
+                          &ui_Screen1_screen_init);
     }
 }
 

@@ -42,7 +42,8 @@ lv_obj_t * uik_topbar(lv_obj_t * parent, const char * title,
     if (right_out) *right_out = NULL;
 
     lv_obj_t * bar = lv_obj_create(parent);
-    lv_obj_set_size(bar, UIK_W, UIK_TOPBAR_Y + UIK_TOPBAR_H + 2);
+    // 背景条正好铺到内容起点，缝隙和面板之间的一致（原来是写死的 +2）
+    lv_obj_set_size(bar, UIK_W, UIK_CONTENT_Y);
     lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_set_style_bg_color(bar, lv_color_hex(UIK_C_BG), LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(bar, 0, LV_STATE_DEFAULT);

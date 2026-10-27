@@ -26,10 +26,21 @@ extern "C" {
 // ---------------- 尺寸常量 ----------------
 #define UIK_W            320
 #define UIK_H            240
-#define UIK_PAD          10      // 左右留白
+// ★ 缝隙只有一个值：屏幕左右留白、面板横缝、面板竖缝全都用它。
+//   曾经横向用 10、纵向用 4，结果同一屏上"两个卡片之间"看起来比
+//   "上下两行之间"宽一倍多，很显眼。统一成 4（= ui_panel 内部 pad_all）。
+#define UIK_PANEL_GAP    4
+#define UIK_PAD          UIK_PANEL_GAP   // 左右留白 = 面板缝隙，同一个节奏
+// 所有屏幕元素的左右边界都取这两个值，保证"右留白"全屏一致。
+// 320 是个不太好分的数：4 个等宽按钮做不到两端都留 4，所以右留白统一取 8。
+//   UIK_RIGHT_EDGE = 320 - 2*4 = 312
+#define UIK_LEFT         UIK_PAD                        // 4：左边界
+#define UIK_RIGHT_EDGE   (UIK_W - 2 * UIK_PANEL_GAP)    // 312：右边界
+#define UIK_CONTENT_W    (UIK_RIGHT_EDGE - UIK_LEFT)    // 308：通栏元素宽度
 #define UIK_TOPBAR_H     30      // 顶栏按钮高度
-#define UIK_TOPBAR_Y     2
-#define UIK_CONTENT_Y    38      // 顶栏下方内容起始 y
+#define UIK_TOPBAR_Y     UIK_PANEL_GAP
+#define UIK_TOPBAR_BOT   (UIK_TOPBAR_Y + UIK_TOPBAR_H)   // 34：顶栏下沿
+#define UIK_CONTENT_Y    (UIK_TOPBAR_BOT + UIK_PANEL_GAP) // 38：内容起点
 #define UIK_STATUS_H     28      // 底部状态条高度
 #define UIK_STATUS_Y     (UIK_H - UIK_STATUS_H)      // 212
 #define UIK_KB_H         120     // 键盘高度

@@ -11,7 +11,15 @@
 // ============================================================================
 
 #include "ui_ble.h"
+#include "../ui.h"       // ui_Screen1 / ui_Screen1_screen_init / _ui_screen_change
 #include "../ui_kit.h"
+
+// ============================================================================
+//  整个 BLE 屏由 ENABLE_BLE 控制（见 platformio.ini）。
+//  关闭时本文件编译为空 —— 否则这里对 ui_ble_on_send_requested() 的调用
+//  会指向已被裁掉的 ble_uart.cpp，链接期报 undefined reference。
+// ============================================================================
+#if ENABLE_BLE
 
 lv_obj_t * ui_ble = NULL;
 lv_obj_t * ui_ble_back_btn = NULL;
@@ -58,8 +66,10 @@ static void back_btn_cb(lv_event_t * e)
         lv_scr_load(ble_prev_scr);      // 回到进来的那个屏
         return;
     }
-    extern lv_obj_t * ui_dht11;
-    if (ui_dht11) lv_scr_load(ui_dht11);   // 兜底：和 WiFi 屏返回键行为一致
+    // 兜底：和其它屏的返回键一致，都回主菜单（"ESP32-S3 TEST"）。
+    // 这里原来跳的是 ui_dht11，和 WiFi 屏那个错误一样，已一并改掉。
+    _ui_screen_change(&ui_Screen1, LV_SCR_LOAD_ANIM_NONE, 0, 0,
+                      &ui_Screen1_screen_init);
 }
 
 // 接收区清空：业务层的显示缓冲由 LVGL_Demos.cpp 里的 ui_ble_on_clear_requested() 负责
@@ -196,3 +206,5 @@ void ui_ble_screen_destroy(void)
     ui_ble_clear_btn = NULL;
     ble_keyboard = NULL;
 }
+
+#endif  // ENABLE_BLE —— 关闭时本文件为空

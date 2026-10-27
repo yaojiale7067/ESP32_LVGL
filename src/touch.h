@@ -2,16 +2,14 @@
 
 #define TOUCH_FT6336
 
-// ========== I2C 引脚（适配 ESP32-S3 N16R8） ==========
-// 原 ESP32 使用 SCL=25, SDA=32
-// ESP32-S3 建议使用 SCL=1, SDA=2 （或其他空闲 I2C 引脚）
+// I2C 引脚（ESP32-S3：SCL=1, SDA=2；原 ESP32 为 SCL=25/SDA=32）
 #define TOUCH_FT6336_SCL 1
 #define TOUCH_FT6336_SDA 2
 
 #define TOUCH_FT6336_INT -1
-#define TOUCH_FT6336_RST 42   // 复位引脚可保留 33（若冲突可改为 42 或 5）
+#define TOUCH_FT6336_RST 42   // 复位引脚仍可用 33（若冲突可改 42 或 5）
 
-// 触摸映射范围（根据屏幕分辨率，保持不变）
+// 触摸映射范围（按屏幕分辨率设定）
 #define TOUCH_MAP_X1 0
 #define TOUCH_MAP_X2 240
 #define TOUCH_MAP_Y1 0
@@ -24,7 +22,7 @@ FT6336 ts = FT6336(TOUCH_FT6336_SDA, TOUCH_FT6336_SCL, TOUCH_FT6336_INT, TOUCH_F
 
 void touch_init(unsigned short int w, unsigned short int h,unsigned char r)
 {
-  width = w; 
+  width = w;
   height = h;
   switch (r){
     case ROTATION_NORMAL:
