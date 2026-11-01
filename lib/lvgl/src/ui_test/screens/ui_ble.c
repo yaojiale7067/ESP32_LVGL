@@ -153,7 +153,11 @@ void ui_ble_screen_init(void)
     lv_obj_set_style_border_color(ui_ble_rx_ta, lv_color_hex(0x555555), LV_STATE_DEFAULT);
     lv_obj_set_style_pad_all(ui_ble_rx_ta, 4, LV_STATE_DEFAULT);
     lv_textarea_set_placeholder_text(ui_ble_rx_ta, "Waiting for data...");
-    lv_textarea_set_max_length(ui_ble_rx_ta, BLE_RX_MAX_CHARS);
+    // 不要给接收区设 max_length：lv_textarea_set_text() 一旦发现 max_length
+    // 非 0，就会把文本一个字符一个字符地 add_char 进去，到达上限后**丢掉后面
+    // 的内容**——也就是保留最老的、丢掉最新的，接收区看起来就永远停在旧内容上。
+    // 接收缓冲本身已经由 ble_uart.cpp 的 rx_disp[BLE_RX_MAX_CHARS+1] 限长，
+    // 这里不设上限，set_text 走 lv_label_set_text 快路径，一次性替换整段文本。
     // 接收区也接上焦点回调：LVGL 的文本框只有在“活动输入组”里才能被拖动滚动，
     // 而键盘只跟发送框绑定，所以这里点一下不会弹出键盘。
     lv_obj_add_event_cb(ui_ble_rx_ta, ta_focus_cb,   LV_EVENT_FOCUSED,   NULL);

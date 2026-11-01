@@ -40,8 +40,9 @@ static BLECharacteristic* ble_tx_char = NULL;    // notify 用
 static BLEAdvertising*    ble_adv    = NULL;
 static volatile bool      ble_ready  = false;    // 协议栈已就绪，可以收/发
 
-// 接收显示缓冲
-static char     rx_disp[512];
+// 接收显示缓冲。长度和 ui_ble.h 里的 BLE_RX_MAX_CHARS 对齐，
+// 这样接收区不设 max_length 也不会被塞进超出缓冲的文本。
+static char     rx_disp[BLE_RX_MAX_CHARS + 1];
 static uint16_t rx_disp_len = 0;
 static volatile bool rx_dirty = false;
 static uint32_t last_pump_ms = 0;
@@ -160,11 +161,15 @@ void ui_ble_set_status(void)
 
 // 先快照（临界区，几微秒），再放开锁去动 LVGL：
 // 不能在临界区里调 lv_textarea_set_text，那会把蓝牙协议栈的中断响应拖长。
+//
+// 注意这里【不能】再判 rx_dirty：pump() 把 rx_dirty 清掉之后才置 g_bleRxPending，
+// 所以进到本函数时它一定是 false。原来那句 `if (... || !rx_dirty) return;`
+// 会让每次刷新都提前返回，接收区永远显示不出真正收到的内容。
 static void ui_ble_refresh_rx(void)
 {
-    if (ui_ble_rx_ta == NULL || !rx_dirty) return;
+    if (ui_ble_rx_ta == NULL) return;
 
-    static char snapshot[512];
+    static char snapshot[sizeof(rx_disp)];
     portENTER_CRITICAL(&rx_disp_mux);
     rx_dirty = false;
     memcpy(snapshot, rx_disp, (size_t)rx_disp_len + 1);
@@ -310,11 +315,7 @@ size_t bleuart_send(const char* data, size_t len)
         vTaskDelay(pdMS_TO_TICKS(8));        // 给协议栈一点时间把包发出去
     }
     tx_total += (uint32_t)sent;
-    // 回显到接收区，方便确认到底发出去了什么
-    rx_disp_append("> ", 2);
-    rx_disp_append(data, len < 120 ? len : 120);
-    if (len >= 120) rx_disp_append("...", 3);
-    rx_disp_append("\n", 1);
+    // 不回显到接收区：接收框只显示从对端收到的数据
     return sent;
 }
 

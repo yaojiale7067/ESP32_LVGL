@@ -134,6 +134,28 @@ static void ui_set_status(const char* text, uint32_t color) {
     lv_obj_set_style_text_color(ui_status_label, lv_color_hex(color), LV_STATE_DEFAULT);
 }
 
+// ---------------------------------------------------------------------------
+//  只在文本真的变了才写标签
+// ---------------------------------------------------------------------------
+//  lv_label_set_text() 第一件事就是 lv_obj_invalidate()，哪怕传进去的字符串和
+//  现在完全一样，也会把这块区域重新绘一遍 → 重新走一次 setAddrWindow + pushColors
+//  → 又一次 SPI 写入。而面板自己一直在扫描 GRAM，只要 SPI 写入和扫描在时间上
+//  重叠，写到的那个位置就会在那一次可见帧里出现「上半是新的、下半是旧的」的缝。
+//
+//  温湿度屏上只有三个小标签会变，而且 DHT11 数值几秒到几分钟才动一次。如果每秒
+//  无条件重设这三个标签，屏幕上就永远存在周期性 SPI 写入，缝也就一直有概率出现，
+//  位置随写入块走 —— 片内温度在屏幕下方，所以看起来就是「底下有点撕裂」。
+//
+//  先比较、后写入：值没变就一个像素都不发，静态界面彻底没有写入，撕裂概率归零。
+// ---------------------------------------------------------------------------
+static void label_set_text_if_changed(lv_obj_t* lbl, const char* text)
+{
+    if (lbl == NULL || text == NULL) return;
+    const char* cur = lv_label_get_text(lbl);
+    if (cur != NULL && strcmp(cur, text) == 0) return;
+    lv_label_set_text(lbl, text);
+}
+
 static bool is_jpeg_file(const String& filename) {
     String lower = filename;
     lower.toLowerCase();
@@ -179,15 +201,15 @@ static bool dht_read_cached(float* temp, float* humi, bool force) {
 void update_dht11_display() {
     float t, h;
     if (!dht_read_cached(&t, &h, false)) {
-        if (ui_Labeltemp != NULL) lv_label_set_text(ui_Labeltemp, "--");
-        if (ui_Labelrh   != NULL) lv_label_set_text(ui_Labelrh,   "--");
+        label_set_text_if_changed(ui_Labeltemp, "--");
+        label_set_text_if_changed(ui_Labelrh,   "--");
         return;
     }
     char temp_str[16], humi_str[16];
     snprintf(temp_str, sizeof(temp_str), "%.1f", t);
     snprintf(humi_str, sizeof(humi_str), "%.1f", h);
-    if (ui_Labeltemp != NULL) lv_label_set_text(ui_Labeltemp, temp_str);
-    if (ui_Labelrh   != NULL) lv_label_set_text(ui_Labelrh,   humi_str);
+    label_set_text_if_changed(ui_Labeltemp, temp_str);
+    label_set_text_if_changed(ui_Labelrh,   humi_str);
 }
 
 // 片内温度：读到的是芯片自身温度（通常比环境高 5~15°C），只适合判断是否过热。
@@ -196,6 +218,7 @@ void update_dht11_display() {
 
 static unsigned long last_chip_read_ms = 0;
 static float         last_chip_temp    = NAN;
+static uint32_t      s_chip_color      = UIK_C_TEXT;   // 当前已应用的文字颜色，避免重复重绘
 
 static bool chip_temp_read_cached(float* out) {
     unsigned long now = millis();
@@ -216,15 +239,20 @@ static void update_chip_temp_display(void) {
     if (ui_dht11_chip == NULL) return;
     float c;
     if (!chip_temp_read_cached(&c)) {
-        lv_label_set_text(ui_dht11_chip, "--.- °C");
+        label_set_text_if_changed(ui_dht11_chip, "--.- °C");
         return;
     }
     char buf[24];
     snprintf(buf, sizeof(buf), "%.1f °C", c);
-    lv_label_set_text(ui_dht11_chip, buf);
+    label_set_text_if_changed(ui_dht11_chip, buf);
     // 超过 70°C 变红提醒（ESP32-S3 结温上限约 125°C，但 70°C 已偏高）
-    lv_obj_set_style_text_color(ui_dht11_chip,
-        lv_color_hex(c >= 70.0f ? UIK_C_ERR_TEXT : UIK_C_TEXT), LV_STATE_DEFAULT);
+    // set_style_text_color 同样会 lv_obj_invalidate，所以也要先比较再写，
+    // 否则每 5 秒一次无条件重绘，屏幕上还是没有安静的时候。
+    uint32_t want = (c >= 70.0f) ? UIK_C_ERR_TEXT : UIK_C_TEXT;
+    if (want != s_chip_color) {
+        s_chip_color = want;
+        lv_obj_set_style_text_color(ui_dht11_chip, lv_color_hex(want), LV_STATE_DEFAULT);
+    }
 }
 
 // 时区与校时（东八区）：屏幕时钟和串口的 date 命令共用同一套设置
@@ -317,11 +345,12 @@ void dht_timer_cb(lv_timer_t* timer) {
 
 // 保证温湿度标签是干净的占位符；函数名保留给 original_setup() 的调用点。
 void fix_dht11_label_display() {
-    if (ui_Labeltemp != NULL) lv_label_set_text(ui_Labeltemp, "--");
-    if (ui_Labelrh   != NULL) lv_label_set_text(ui_Labelrh,   "--");
+    label_set_text_if_changed(ui_Labeltemp, "--");
+    label_set_text_if_changed(ui_Labelrh,   "--");
     if (ui_dht11_chip != NULL) {
-        lv_label_set_text(ui_dht11_chip, "--.- °C");
-        lv_obj_set_style_text_color(ui_dht11_chip, lv_color_hex(UIK_C_TEXT),
+        label_set_text_if_changed(ui_dht11_chip, "--.- °C");
+        s_chip_color = UIK_C_TEXT;
+        lv_obj_set_style_text_color(ui_dht11_chip, lv_color_hex(s_chip_color),
                                     LV_STATE_DEFAULT);
     }
 }

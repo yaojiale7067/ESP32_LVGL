@@ -62,16 +62,20 @@ static void go_ble_cb(lv_event_t * e)
 }
 #endif
 
-// ---- 菜单几何：行高 32，间距和屏幕边距都用统一的缝隙值 ----
+// ---- 菜单几何：间距和屏幕边距都用统一的缝隙值 ----
 // 原来 MENU_X 写死 16、MENU_Y0 写死 56（顶着标题条），和全屏统一后的
 // 缝隙(4)都不一致。现在标题条高度和菜单起点都从统一值推导。
+//
+// 行高从 32 收到 30：5 行时 50 + 5*32 + 4*4 = 226 会压到左下角版本号
+// （10pt 行高 13，底边贴 -4，即 223~236），最后一行下沿和文字顶端重叠 3px。
+// 改成 30 行高 / 34 步进后菜单到 216 结束，和版本号之间留出 7px。
 #define MENU_X      UIK_PANEL_GAP               // 4（= 左右边距，和面板缝隙同一个值）
 #define MENU_W      (UIK_W - 2 * MENU_X)        // 312
 #define TITLEBAR_H  (UIK_CONTENT_Y + 8)         // 46：顶部标题条高度
 #define MENU_Y0     (TITLEBAR_H + UIK_PANEL_GAP) // 50：标题条下沿 + 一个缝隙
-#define MENU_ROW_H  32
+#define MENU_ROW_H  30
 #define MENU_GAP    UIK_PANEL_GAP               // 4（行间距）
-#define MENU_STEP   (MENU_ROW_H + MENU_GAP)     // 36
+#define MENU_STEP   (MENU_ROW_H + MENU_GAP)     // 34
 
 void ui_Screen1_screen_init(void)
 {
@@ -124,10 +128,13 @@ void ui_Screen1_screen_init(void)
                               go_wifi_cb, NULL);
     ui_Label12 = lv_obj_get_child(ui_Button8, 0);
 
-    // 5) Bluetooth —— 用主色蓝突出；进入前记录来源屏，返回键才能回得来
+    // 5) Bluetooth —— 与上面 4 行同色（UIK_C_SURFACE）。
+    //    原来这里写的是 UIK_C_PRIMARY（主色蓝），于是主菜单上唯一一个蓝按钮
+    //    显得像"被选中/已激活"，其实它和其它行一样只是一级入口。
+    //    主色只用在真正的主操作上（例如各屏的 Send 按钮）。
 #if ENABLE_BLE
     ui_ButtonBle = uik_menu_row(ui_Screen1, MENU_X, MENU_Y0 + 4 * MENU_STEP, MENU_W, MENU_ROW_H,
-                                LV_SYMBOL_BLUETOOTH "  Bluetooth", UIK_C_PRIMARY,
+                                LV_SYMBOL_BLUETOOTH "  Bluetooth", UIK_C_SURFACE,
                                 go_ble_cb, NULL);
     ui_LabelBle = lv_obj_get_child(ui_ButtonBle, 0);
 #endif

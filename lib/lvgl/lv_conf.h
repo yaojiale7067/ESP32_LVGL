@@ -283,7 +283,12 @@
  *-----------*/
 
 /*1: Show CPU usage and FPS count*/
-#define LV_USE_PERF_MONITOR 1
+/* 关闭：perf 标签挂在 lv_layer_sys() 上、对齐 BOTTOM_RIGHT，每 300ms 改一次
+ * 文本("NN FPS\nNN% CPU")。每次改文本都会 lv_obj_invalidate → 一块固定落在
+ *【屏幕右下角】的小区域被反复重画，也就是反复发起 SPI 写入。这种周期性重画
+ * 一旦撞上面板自身的扫描，右下角就会出现一道一闪一闪的横缝。静态界面不需要
+ * 这个调试叠层，关掉它，屏幕底部就再没有常驻的重复刷新区。 */
+#define LV_USE_PERF_MONITOR 0
 #if LV_USE_PERF_MONITOR
     #define LV_USE_PERF_MONITOR_POS LV_ALIGN_BOTTOM_RIGHT
 #endif
