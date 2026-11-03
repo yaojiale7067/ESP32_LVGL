@@ -5,6 +5,7 @@
 
 #include "ui.h"
 #include "ui_helpers.h"
+#include "ui_kit.h"
 
 ///////////////////// VARIABLES ////////////////////
 
@@ -30,9 +31,20 @@ lv_obj_t * ui____initial_actions0;
 void ui_init(void)
 {
     lv_disp_t * dispp = lv_disp_get_default();
-    lv_theme_t * theme = lv_theme_default_init(dispp, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_RED),
-                                               true, LV_FONT_DEFAULT);
+
+    // 默认主题仍然要建：lv_list / lv_keyboard / lv_textarea 这些控件的子部件
+    // （滚动条、键帽、光标、占位符）都靠它给一份基础样式，否则会是裸对象。
+    // 但配色和字号要跟 ui_kit 对齐，不能再用 lv_palette_main(BLUE)：
+    //   - primary 换成 ui_kit 的主色，滚动条/键盘 checked 态就是这个色
+    //   - 三个字号全用 BODY(12pt)，这样"忘记显式设字号的控件"也是 12pt，
+    //     不会突然冒出 14pt 打乱节奏
+    lv_theme_t * theme = lv_theme_default_init(dispp,
+                                               lv_color_hex(UIK_C_PRIMARY),
+                                               lv_color_hex(UIK_C_DANGER),
+                                               true,          // dark
+                                               UIK_FONT_BODY);
     lv_disp_set_theme(dispp, theme);
+
     ui_Screen1_screen_init();
     ui_SerialTool_screen_init();
     ui_dht11_screen_init();

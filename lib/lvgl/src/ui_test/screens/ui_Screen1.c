@@ -1,7 +1,21 @@
 // ============================================================================
 //  ui_Screen1.c - 主菜单
-//  统一后的样式：顶栏 + 5 行整行可点的菜单项（与蓝牙屏同一套视觉规范）
-//  菜单项：Temp/RH、File Manager、Serial Tool、WiFi、Bluetooth
+//
+//  视觉结构（320x240）：
+//      0..39    标题条：左边 "ESP32-S3" 20pt，右边 "LVGL 8.3.6" 10pt 弱化
+//      40       1px 分隔线
+//      44..235  5 行菜单，每行 35 高、间隔 4：
+//                  [徽章]  Temp / RH                              ›
+//      235..240 底部留白
+//
+//  相比旧版：
+//    1) 每行左侧加了一个 25px 的图标徽章，按功能上色（琥珀/青绿/黄绿/蓝/靛紫）。
+//       以前五行都是同一个灰底 + 同一档灰白图标，扫过去分不出谁是谁。
+//    2) 标题条从"两行居中文字"改成"左对齐大标题 + 右侧版本号"：
+//       菜单本身才是这屏的主体，标题没必要占两行居中。
+//    3) 去掉了压在屏幕左下角的版本号 —— 它和第五行只差 7px，视觉上像是
+//       菜单的一部分。版本号移到标题条右侧，作为背景信息存在。
+//    4) 按下态改成提亮（见 uik_btn_states），点击有明确反馈。
 //
 //  对外符号保持不变（ui_Screen1 / ui_Button2/3/5/8 / ui_Label2/5/7/11/12），
 //  这样 ui_events.h 里由 SquareLine 生成的 event 函数仍能正常链接。
@@ -19,13 +33,13 @@ lv_obj_t * ui_Button5 = NULL;      // Uart
 lv_obj_t * ui_Label7 = NULL;
 lv_obj_t * ui_Button3 = NULL;      // Temp
 lv_obj_t * ui_Label2 = NULL;
-lv_obj_t * ui_Label11 = NULL;      // 左下角版本号
+lv_obj_t * ui_Label11 = NULL;      // 版本号（现在在标题条右侧）
 lv_obj_t * ui_Button2 = NULL;      // File
 lv_obj_t * ui_Label5 = NULL;
 lv_obj_t * ui_Button8 = NULL;      // WiFi
 lv_obj_t * ui_Label12 = NULL;
 
-static lv_obj_t * ui_ButtonBle = NULL;    // BLE（新增）
+static lv_obj_t * ui_ButtonBle = NULL;    // BLE
 static lv_obj_t * ui_LabelBle = NULL;
 
 // ---- 菜单行的点击处理（统一用无动画切换，视觉上更干净）--------------------
@@ -57,94 +71,88 @@ static void go_ble_cb(lv_event_t * e)
     (void)e;
     if (ui_ble != NULL) {
         ble_set_prev_screen(lv_scr_act());   // 记住来源屏，BLE 屏的返回键才回得来
-        lv_scr_load(ui_ble);
+        uik_screen_load(ui_ble);             // 统一入口：加载后补一次整屏失效
     }
 }
 #endif
 
-// ---- 菜单几何：间距和屏幕边距都用统一的缝隙值 ----
-// 原来 MENU_X 写死 16、MENU_Y0 写死 56（顶着标题条），和全屏统一后的
-// 缝隙(4)都不一致。现在标题条高度和菜单起点都从统一值推导。
-//
-// 行高从 32 收到 30：5 行时 50 + 5*32 + 4*4 = 226 会压到左下角版本号
-// （10pt 行高 13，底边贴 -4，即 223~236），最后一行下沿和文字顶端重叠 3px。
-// 改成 30 行高 / 34 步进后菜单到 216 结束，和版本号之间留出 7px。
-#define MENU_X      UIK_PANEL_GAP               // 4（= 左右边距，和面板缝隙同一个值）
-#define MENU_W      (UIK_W - 2 * MENU_X)        // 312
-#define TITLEBAR_H  (UIK_CONTENT_Y + 8)         // 46：顶部标题条高度
-#define MENU_Y0     (TITLEBAR_H + UIK_PANEL_GAP) // 50：标题条下沿 + 一个缝隙
-#define MENU_ROW_H  30
-#define MENU_GAP    UIK_PANEL_GAP               // 4（行间距）
-#define MENU_STEP   (MENU_ROW_H + MENU_GAP)     // 34
+// ---- 菜单几何 --------------------------------------------------------------
+// 标题条 40 + 分隔线 1 + 一个缝隙 3 = 44 起；
+// 5 行 * 35 + 4 缝 * 4 = 191，44 + 191 = 235，距屏幕底还有 5px。
+// 这几个数字是绑死的：UIK_ROW_H 是 35，MENU_STEP 必须等于 35+4。
+#define MENU_X      UIK_PANEL_GAP                    // 4（= 左右边距）
+#define MENU_W      (UIK_W - 2 * MENU_X)             // 312
+#define TITLEBAR_H  40                               // 标题条高度
+#define MENU_Y0     (TITLEBAR_H + UIK_PANEL_GAP)     // 44：标题条 + 分隔线 + 缝隙
+#define MENU_STEP   (UIK_ROW_H + UIK_PANEL_GAP)      // 39
 
 void ui_Screen1_screen_init(void)
 {
     ui_Screen1 = uik_screen_init();
 
-    // 标题区（主菜单没有"返回"，顶栏只放标题）
+    // ---- 标题条 ----
+    // 不用 uik_topbar()：主菜单没有"返回"，也不需要居中标题，
+    // 用左对齐大标题 + 右侧版本号更省纵向空间。
     lv_obj_t * bar = lv_obj_create(ui_Screen1);
+    lv_obj_remove_style_all(bar);
     lv_obj_set_size(bar, UIK_W, TITLEBAR_H);
     lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_set_style_bg_color(bar, lv_color_hex(UIK_C_BG), LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(bar, 0, LV_STATE_DEFAULT);
-    lv_obj_set_style_radius(bar, 0, LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_all(bar, 0, LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_STATE_DEFAULT);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t * title = lv_label_create(bar);
-    lv_label_set_text(title, "ESP32-S3 TEST");
-    lv_obj_set_style_text_font(title, UIK_FONT_TITLE, LV_STATE_DEFAULT);
+    lv_label_set_text(title, "ESP32-S3");
+    lv_obj_set_style_text_font(title, UIK_FONT_BIG, LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(title, lv_color_hex(UIK_C_TEXT), LV_STATE_DEFAULT);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, UIK_PAD, 0);
+    lv_obj_clear_flag(title, LV_OBJ_FLAG_CLICKABLE);
 
-    lv_obj_t * sub = lv_label_create(bar);
-    lv_label_set_text(sub, LV_SYMBOL_LIST " Main Menu");
-    lv_obj_set_style_text_font(sub, UIK_FONT_HINT, LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(sub, lv_color_hex(UIK_C_TEXT_DIM), LV_STATE_DEFAULT);
-    lv_obj_align(sub, LV_ALIGN_BOTTOM_MID, 0, -2);
+    // 版本号：原来贴在屏幕左下角，和第五行只差 7px，看起来像菜单的一部分。
+    // 现在放到标题条右侧，弱化成背景信息。
+    ui_Label11 = lv_label_create(bar);
+    lv_label_set_text(ui_Label11, "LVGL 8.3.6");
+    lv_obj_set_style_text_font(ui_Label11, UIK_FONT_HINT, LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(ui_Label11, lv_color_hex(UIK_C_TEXT_FAINT), LV_STATE_DEFAULT);
+    lv_obj_align(ui_Label11, LV_ALIGN_RIGHT_MID, -UIK_PAD, 0);
+    lv_obj_clear_flag(ui_Label11, LV_OBJ_FLAG_CLICKABLE);
+
+    // 标题条下的分隔线
+    uik_separator(ui_Screen1, 0, TITLEBAR_H, UIK_W);
 
     // ---- 5 行菜单 ----
-    // 1) Temp / RH
-    ui_Button3 = uik_menu_row(ui_Screen1, MENU_X, MENU_Y0, MENU_W, MENU_ROW_H,
-                              LV_SYMBOL_HOME "  Temp / RH", UIK_C_SURFACE,
-                              go_dht11_cb, NULL);
-    ui_Label2 = lv_obj_get_child(ui_Button3, 0);      // 行内文字标签，保持旧符号有效
+    // 每行：左侧功能身份色的图标徽章 + 标题 + 右侧箭头（由 uik_menu_row_icon 画）
+    ui_Button3 = uik_menu_row_icon(ui_Screen1, MENU_X, MENU_Y0, MENU_W, UIK_ROW_H,
+                                   LV_SYMBOL_TINT, "Temp / RH",
+                                   UIK_ACCENT_TEMP, UIK_C_SURFACE,
+                                   go_dht11_cb, NULL, &ui_Label2);
 
-    // 2) File Manager
-    ui_Button2 = uik_menu_row(ui_Screen1, MENU_X, MENU_Y0 + MENU_STEP, MENU_W, MENU_ROW_H,
-                              LV_SYMBOL_DIRECTORY "  File Manager", UIK_C_SURFACE,
-                              go_file_cb, NULL);
-    ui_Label5 = lv_obj_get_child(ui_Button2, 0);
+    ui_Button2 = uik_menu_row_icon(ui_Screen1, MENU_X, MENU_Y0 + MENU_STEP, MENU_W, UIK_ROW_H,
+                                   LV_SYMBOL_DIRECTORY, "File Manager",
+                                   UIK_ACCENT_FILE, UIK_C_SURFACE,
+                                   go_file_cb, NULL, &ui_Label5);
 
-    // 3) Serial Tool
-    ui_Button5 = uik_menu_row(ui_Screen1, MENU_X, MENU_Y0 + 2 * MENU_STEP, MENU_W, MENU_ROW_H,
-                              LV_SYMBOL_KEYBOARD "  Serial Tool", UIK_C_SURFACE,
-                              go_serial_cb, NULL);
-    ui_Label7 = lv_obj_get_child(ui_Button5, 0);
+    ui_Button5 = uik_menu_row_icon(ui_Screen1, MENU_X, MENU_Y0 + 2 * MENU_STEP, MENU_W, UIK_ROW_H,
+                                   LV_SYMBOL_KEYBOARD, "Serial Tool",
+                                   UIK_ACCENT_SERIAL, UIK_C_SURFACE,
+                                   go_serial_cb, NULL, &ui_Label7);
 
-    // 4) WiFi
-    ui_Button8 = uik_menu_row(ui_Screen1, MENU_X, MENU_Y0 + 3 * MENU_STEP, MENU_W, MENU_ROW_H,
-                              LV_SYMBOL_WIFI "  WiFi", UIK_C_SURFACE,
-                              go_wifi_cb, NULL);
-    ui_Label12 = lv_obj_get_child(ui_Button8, 0);
+    ui_Button8 = uik_menu_row_icon(ui_Screen1, MENU_X, MENU_Y0 + 3 * MENU_STEP, MENU_W, UIK_ROW_H,
+                                   LV_SYMBOL_WIFI, "WiFi",
+                                   UIK_ACCENT_WIFI, UIK_C_SURFACE,
+                                   go_wifi_cb, NULL, &ui_Label12);
 
-    // 5) Bluetooth —— 与上面 4 行同色（UIK_C_SURFACE）。
+    // 5) Bluetooth —— 和上面 4 行同底色（UIK_C_SURFACE）。
     //    原来这里写的是 UIK_C_PRIMARY（主色蓝），于是主菜单上唯一一个蓝按钮
     //    显得像"被选中/已激活"，其实它和其它行一样只是一级入口。
     //    主色只用在真正的主操作上（例如各屏的 Send 按钮）。
 #if ENABLE_BLE
-    ui_ButtonBle = uik_menu_row(ui_Screen1, MENU_X, MENU_Y0 + 4 * MENU_STEP, MENU_W, MENU_ROW_H,
-                                LV_SYMBOL_BLUETOOTH "  Bluetooth", UIK_C_SURFACE,
-                                go_ble_cb, NULL);
-    ui_LabelBle = lv_obj_get_child(ui_ButtonBle, 0);
+    ui_ButtonBle = uik_menu_row_icon(ui_Screen1, MENU_X, MENU_Y0 + 4 * MENU_STEP, MENU_W, UIK_ROW_H,
+                                     LV_SYMBOL_BLUETOOTH, "Bluetooth",
+                                     UIK_ACCENT_BLE, UIK_C_SURFACE,
+                                     go_ble_cb, NULL, &ui_LabelBle);
 #endif
-
-    // ---- 左下角版本号（原 ui_Label11）----
-    // 贴在左下角，和屏幕边距同一个缝隙值。
-    // 状态条的提示文字是居中的，所以这里左对齐不会打架。
-    ui_Label11 = uik_label(ui_Screen1, "lvgl v8.3.6", MENU_X, 0,
-                           UIK_C_TEXT_DIM, UIK_FONT_HINT, LV_TEXT_ALIGN_LEFT);
-    lv_obj_align(ui_Label11, LV_ALIGN_BOTTOM_LEFT, MENU_X, -MENU_X);
 
     uic_Screen1 = ui_Screen1;
 }

@@ -79,6 +79,12 @@
 /*Default display refresh period. LVG will redraw changed areas with this period time*/
 #define LV_DISP_DEF_REFR_PERIOD 10      /*[ms] 原5ms过快，改为30ms降低无效刷新*/
 
+/*Invalid area buffer size. It determines how many areas can be stored.
+ *默认 32。本工程主菜单 5 行、每行 6~7 个对象，一次刷新里产生的脏矩形
+ *很容易超过 32，超了 LVGL 会退化成"整屏重画"（见 lv_refr.c 的 _lv_inv_area），
+ *白白多推几十毫秒 SPI。64 项只多占 64×8 = 512 字节。*/
+#define LV_INV_BUF_SIZE 64
+
 /*Input device read period in milliseconds*/
 #define LV_INDEV_DEF_READ_PERIOD 10     /*[ms]*/
 

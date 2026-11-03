@@ -54,6 +54,23 @@ void _ui_screen_change(lv_obj_t ** target, lv_scr_load_anim_t fademode, int spd,
     if(*target == NULL)
         target_init();
     lv_scr_load_anim(*target, fademode, spd, delay, false);
+
+    /* ★ 切屏后强制整屏重画一次。
+     *
+     * 起因：偶尔会有一小块区域（实测是主菜单 WiFi 那一行）显示成上一次的残留，
+     * "切到别的屏再切回来"就正常。原因是 LVGL 的失效是会被静默丢弃的：
+     *   lv_obj_invalidate_area() → lv_obj_area_is_visible()，
+     * 只要对象所属屏幕不是「当前屏幕 / 上一个屏幕 / layer」，就直接 return。
+     * 屏幕都是在 ui_init() 里一次性建好的，建的时候它们都不是当前屏幕，
+     * 所以建屏阶段所有失效全部被丢掉，首帧只能靠 scr_load_internal() 末尾
+     * 那一次 lv_obj_invalidate(scr) 兜底。只要那一次没把某个子区域包含进来
+     * （或者那次失效正好撞上渲染中，lv_refr.c 里 rendering_in_progress 那条
+     * 也会直接 return 丢掉），就会留下一块没重画的残留。
+     * 切屏回来会再整屏失效一次，所以"回来就好了"。
+     *
+     * 这里补一次显式整屏失效，让**每次进屏都等价于"切走再回来"**，
+     * 不再依赖上面那次兜底是否恰好完整。整屏重画约 15~20ms，只在切屏时发生。*/
+    lv_obj_invalidate(*target);
 }
 
 void _ui_screen_delete(void (*target)(void))

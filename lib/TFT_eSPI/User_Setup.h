@@ -28,7 +28,18 @@
 #define LOAD_FONT7
 #define LOAD_FONT8
 #define LOAD_GFXFF
-#define SPI_FREQUENCY   80000000   // 40 MHz（如果稳定可使用 60/80 MHz）
-#define SPI_READ_FREQUENCY  80000000
+// ★ 60MHz，不是 80MHz。
+//   症状：切屏/返回时，屏幕上会**随机位置**出现一小块错位的画面（比如某行的
+//   图标旁边多出一条同色的竖条），有时正常。稳态时几乎不出现。
+//   原因：那是一条被偏移复制的画面碎片 —— SPI 长突发传输中途丢了/错了位。
+//   稳态每次只推几百~几千字节，出错概率低；切屏要一口气推 153600 字节
+//   （整屏 320x240x16bpp），字节越多越容易在中途出错，错在哪随机。
+//   80MHz 走排线/面包板本来就贴着临界点，降到 60MHz 换取时序余量。
+//
+//   注意这和"撕裂"不冲突：整屏推送时间 = 153600*8/60e6 ≈ 20.5ms，
+//   仍小于面板帧周期 28.5ms（DISP_FRAME_DIV=1, RTNA=0x1B），
+//   所以之前定好的防撕裂参数依然成立，不用动 display_port.cpp。
+#define SPI_FREQUENCY   60000000
+#define SPI_READ_FREQUENCY  60000000
 #define SPI_TOUCH_FREQUENCY  2500000
 

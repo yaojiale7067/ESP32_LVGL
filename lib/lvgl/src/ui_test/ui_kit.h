@@ -1,17 +1,29 @@
 // ============================================================================
 //  ui_kit.h - 全工程统一的 UI 视觉规范 / 组件工厂
 //
-//  设计语言（源自蓝牙屏那一版，现在推广到所有屏）：
-//      背景 0x1E1E1E  →  面板/输入框 0x2D2D2D  →  边框 0x555555
-//      主色(蓝) 0x2D6CB5   成功/发送(绿) 0x2E8B57
-//      次要按钮(灰) 0x3D3D3D   危险(红) 0xFF5555
-//      文本：主 0xFFFFFF / 次要 0xAAAAAA / 成功 0x88FF88 / 警告 0xFFFF88 / 错误 0xFF8888
-//      圆角 5px，左右留白 10px，顶栏高 30px
+//  设计语言
+//  ------------------------------------------------------------------------
+//  深色界面，靠【明度台阶】分层，而不是靠描边：
+//      背景 0x1A1A1A → 面板 0x262626 → 抬起 0x303030 → 凹陷(终端) 0x0F0F0F
+//  边框统一压暗到 0x343434。以前是 0x555555，每个面板/输入框都描一圈亮边，
+//  整屏看起来像一堆"线框盒子"，视线被边框牵着走；压暗之后边框只负责界定范围，
+//  层级由明度差承担，画面安静很多。
+//
+//  文本不用纯白：0xFFFFFF 贴在近黑底上会有光晕，长时间看刺眼。改成 0xF0F0F0，
+//  对比度仍然远超 7:1，但字形边缘干净。
+//
+//  强调色只用在【语义】上，不用于装饰：
+//      PRIMARY 蓝 = 主操作        SUCCESS 绿 = 确认/发送/新建
+//      DANGER  红 = 破坏性操作    NEUTRAL 灰 = 次要操作(返回/取消)
+//      ACCENT_*   = 各功能入口的身份色。只出现在菜单行的图标徽章和卡片的
+//                   3px 小色条上，面积极小，所以五个颜色同时出现也不吵。
 //
 //  统一后的每屏结构：
-//      [← Back]      标题        [右侧按钮(可选)]      ← 顶栏 y 2~32
-//      y 38 起：内容区（面板 / 列表 / 大号数值）
-//      y 208~236：底部状态提示（横向滚动）
+//      [← Back]      标题        [右侧按钮(可选)]   ← 顶栏 0~37，下沿 1px 分隔线
+//      y 42 起：内容区（面板 / 列表 / 大号数值）
+//      y 212~239：底部状态提示，上沿 1px 分隔线
+//
+//  ★ 改配色/字号只改这一个文件，各屏不要手写 lv_color_hex(0x......)。
 // ============================================================================
 
 #ifndef UI_KIT_H
@@ -31,53 +43,106 @@ extern "C" {
 //   "上下两行之间"宽一倍多，很显眼。统一成 4（= ui_panel 内部 pad_all）。
 #define UIK_PANEL_GAP    4
 #define UIK_PAD          UIK_PANEL_GAP   // 左右留白 = 面板缝隙，同一个节奏
-// 所有屏幕元素的左右边界都取这两个值，保证"右留白"全屏一致。
-// 320 是个不太好分的数：4 个等宽按钮做不到两端都留 4，所以右留白统一取 8。
-//   UIK_RIGHT_EDGE = 320 - 2*4 = 312
+// 所有屏幕元素的左右边界都取这两个值，保证左右留白都是 4、全屏一致。
+// 320 是个不好分的数：用 4 做留白、通栏宽 312 之后，
+//   4 个等宽按钮正好 (312 - 3*4) / 4 = 75，
+//   两张卡片正好 (312 - 4) / 2 = 154，
+// 都能整除，所以"左右各留 4"是可以严格做到的，不必让右边多留一点。
 #define UIK_LEFT         UIK_PAD                        // 4：左边界
-#define UIK_RIGHT_EDGE   (UIK_W - 2 * UIK_PANEL_GAP)    // 312：右边界
-#define UIK_CONTENT_W    (UIK_RIGHT_EDGE - UIK_LEFT)    // 308：通栏元素宽度
+#define UIK_RIGHT_EDGE   (UIK_W - UIK_PAD)              // 316：右边界
+#define UIK_CONTENT_W    (UIK_RIGHT_EDGE - UIK_LEFT)    // 312：通栏元素宽度
+
 #define UIK_TOPBAR_H     30      // 顶栏按钮高度
 #define UIK_TOPBAR_Y     UIK_PANEL_GAP
-#define UIK_TOPBAR_BOT   (UIK_TOPBAR_Y + UIK_TOPBAR_H)   // 34：顶栏下沿
-#define UIK_CONTENT_Y    (UIK_TOPBAR_BOT + UIK_PANEL_GAP) // 38：内容起点
+#define UIK_TOPBAR_BOT   (UIK_TOPBAR_Y + UIK_TOPBAR_H)    // 34：顶栏按钮下沿
+#define UIK_CONTENT_Y    (UIK_TOPBAR_BOT + UIK_PANEL_GAP) // 38：顶栏总高 / 内容起点
 #define UIK_STATUS_H     28      // 底部状态条高度
 #define UIK_STATUS_Y     (UIK_H - UIK_STATUS_H)      // 212
 #define UIK_KB_H         120     // 键盘高度
-#define UIK_RADIUS       5
+#define UIK_KB_TOP       (UIK_H - UIK_KB_H)   // 120：键盘上沿（弹出时占 120..239）
+#define UIK_RADIUS       5       // 面板 / 按钮 / 输入框
+#define UIK_RADIUS_SM    3       // 徽章、小色条、列表容器
 
-// ---------------- 配色 ----------------
-#define UIK_C_BG         0x1E1E1E
-#define UIK_C_SURFACE    0x2D2D2D
-#define UIK_C_BORDER     0x555555
-#define UIK_C_DARK       0x101010
-#define UIK_C_PRIMARY    0x2D6CB5
-#define UIK_C_SUCCESS    0x2E8B57
-#define UIK_C_NEUTRAL    0x3D3D3D
-#define UIK_C_DANGER     0xFF5555
-#define UIK_C_TEXT       0xFFFFFF
-#define UIK_C_TEXT_DIM   0xAAAAAA
-#define UIK_C_OK_TEXT    0x88FF88
-#define UIK_C_WARN_TEXT  0xFFFF88
-#define UIK_C_ERR_TEXT   0xFF8888
+// 主菜单行：标题条(0~40) + 分隔线(40) 之后，44..235 正好放
+//   5 * UIK_ROW_H + 4 * UIK_PANEL_GAP = 5*35 + 4*4 = 191  →  44 + 191 = 235 ✓
+// 行高 35 时装一个 25px 的徽章，上下各留 5px。
+#define UIK_ROW_H        35
+// 图标徽章边长。★ 27 不是随手定的：徽章里放的是 FontAwesome 符号（16pt），
+// 各符号的**字形宽度差异很大**（实测 box_w）：
+//     水滴(U+F043) 11px   蓝牙(U+F293) 12px
+//     键盘(U+F11C) 18px   WiFi(U+F1EB) 20px
+// 徽章 25px 时 WiFi 只剩 (25-20)/2 = 2.5px 边距，几乎顶到圆角边框上，
+// 和水滴的 7px 边距一比就显得"出框了"。放到 27px 后最宽的 WiFi 也有 3.5px。
+#define UIK_BADGE        27
+
+// ---------------- 明度台阶 ----------------
+#define UIK_C_BG         0x1A1A1A   // 屏幕底色
+#define UIK_C_SURFACE    0x262626   // 面板 / 卡片 / 输入框
+#define UIK_C_SURFACE_HI 0x333333   // 抬起一层：按下态、列表选中底
+#define UIK_C_SUNKEN     0x0F0F0F   // 凹陷：终端 / 接收区底色
+#define UIK_C_BORDER     0x343434   // 分隔线 / 面板描边
+#define UIK_C_DARK       UIK_C_SUNKEN   // 旧名，保留兼容
+
+// ---------------- 语义色 ----------------
+#define UIK_C_PRIMARY    0x2D6CB5   // 主操作（蓝）
+#define UIK_C_PRIMARY_HI 0x3D86D8   // 主操作按下
+#define UIK_C_SUCCESS    0x2E8B57   // 确认 / 发送 / 新建（绿）
+#define UIK_C_SUCCESS_HI 0x3CA86E   // 绿按下
+#define UIK_C_NEUTRAL    0x3A3A3A   // 次要操作（灰）
+#define UIK_C_NEUTRAL_HI 0x4D4D4D   // 灰按下
+// 红从 0xFF5555 压到 0xC94A4A：在深色底上纯亮红会"跳"出画面，
+// 而且它只是模式指示，不是警告灯。真正要警示时文字用 UIK_C_ERR_TEXT。
+#define UIK_C_DANGER     0xC94A4A   // 破坏性操作（红）
+#define UIK_C_DANGER_HI  0xE06060
+
+// ---------------- 文本 ----------------
+// 三级文字层次。★ 这三级不是按"设计软件上的观感"定的，而是按这块屏的实测：
+// 320x240 的 TN 面板可视角度差、暗部会糊，比显示器上暗得多。
+// FAINT 原来定 0x6A6A6A，真机上"LVGL 8.3.6"几乎读不出来，抬到 0x8A8A8A。
+#define UIK_C_TEXT       0xF0F0F0   // 主文本（不用纯白，见文件头说明）
+#define UIK_C_TEXT_DIM   0x9C9C9C   // 次要：卡片小标题、单位、提示
+#define UIK_C_TEXT_FAINT 0x8A8A8A   // 更弱：版本号、辅助说明（下限，别再调暗）
+#define UIK_C_OK_TEXT    0x79D08A   // 成功 / 终端回显（原 0x88FF88 太荧光）
+#define UIK_C_WARN_TEXT  0xE8C468
+#define UIK_C_ERR_TEXT   0xE88383
+
+// ---------------- 功能入口的身份色 ----------------
+// 只用于菜单行左侧的图标徽章、以及卡片顶部的小色条。
+// 相邻两行的色相至少差 60°，所以从上到下扫一眼就能区分。
+#define UIK_ACCENT_TEMP    0xE8924A   // 温湿度：琥珀
+#define UIK_ACCENT_FILE    0x43C6B0   // 文件：青绿
+#define UIK_ACCENT_SERIAL  0x8CC461   // 串口：黄绿
+#define UIK_ACCENT_WIFI    0x3FA9E0   // WiFi：蓝
+#define UIK_ACCENT_BLE     0x9B7CF5   // 蓝牙：靛紫
+#define UIK_ACCENT_HUM     0x4FC3D9   // 湿度：浅青
+#define UIK_ACCENT_CHIP    0xE07A7A   // 片内温度：暖红
 
 // ---------------- 字号（全工程只用这几档，不要再手写 lv_font_montserrat_XX）-
 //
 //   TITLE  14pt  顶栏标题 / 按钮文字 / 菜单行
 //   BODY   12pt  正文、输入框、状态条、列表
 //   HINT   10pt  次要说明、单位、卡片小标题
-//   NUM    28pt  仅用于温湿度这类"要大号显示"的数值
+//   ICON   16pt  徽章里的符号（比 TITLE 大一档，符号才撑得满 25px 徽章）
+//   NUM    40pt  仅用于温湿度这类"要大号显示"的数值
 //
-//  历史上这里混用过 12/14/16/44 四种，导致同一层级的文字大小不一致，
-//  而且 16pt 的菜单行和 44pt 的数值明显偏大。改字号只改这一处即可。
+//  NUM 从 28pt 提到 40pt：卡片高 112，40pt 行高 44，加上色条/标题/单位
+//  总共约 90，仍有富余；而温湿度是这一屏唯一要读的信息，理应最大。
 #define UIK_FONT_TITLE   (&lv_font_montserrat_14)
 #define UIK_FONT_BODY    (&lv_font_montserrat_12)
 #define UIK_FONT_HINT    (&lv_font_montserrat_10)
-#define UIK_FONT_NUM     (&lv_font_montserrat_28)
+#define UIK_FONT_ICON    (&lv_font_montserrat_16)
+#define UIK_FONT_NUM     (&lv_font_montserrat_40)
+#define UIK_FONT_BIG     (&lv_font_montserrat_20)   // 次级大数值（片内温度等）
 
 // ---------------- 屏幕外壳 ----------------
 lv_obj_t * uik_screen_init(void);                       // 建屏 + 统一底色
-lv_obj_t * uik_status_bar(lv_obj_t * parent);           // 底部状态提示条（返回标签）
+lv_obj_t * uik_status_bar(lv_obj_t * parent);           // 底部状态提示条（含分隔线）
+lv_obj_t * uik_separator(lv_obj_t * parent, int x, int y, int w);  // 1px 分隔线
+
+// 切屏请一律走这个，别直接 lv_scr_load()：
+// 它在加载后补一次整屏失效，防止"进屏首帧残留一小块、切走再回来才好"。
+// 详见 ui_kit.c 里的注释。
+void uik_screen_load(lv_obj_t * scr);
 
 // ---------------- 顶栏（三件套） ----------------
 // title 可以为 NULL；right_btn_text 为 NULL 时不建右侧按钮。
@@ -98,17 +163,64 @@ lv_obj_t * uik_btn(lv_obj_t * parent, const char * text,
                    int x, int y, int w, int h, uint32_t bg);           // 普通按钮
 
 lv_obj_t * uik_ta(lv_obj_t * parent, int x, int y, int w, int h,
-                  const char * placeholder, bool one_line);            // 文本框
+                  const char * placeholder, bool one_line);             // 文本框
+
+// 只读文本区（终端回显 / 接收缓冲）：凹陷底色 + 等宽感的绿字，
+// 不给焦点环（它不是输入框，加主色描边会误导），但仍可点中拖动滚动。
+lv_obj_t * uik_ta_readonly(lv_obj_t * parent, int x, int y, int w, int h,
+                           const char * placeholder);
 
 lv_obj_t * uik_label(lv_obj_t * parent, const char * text,
                      int x, int y, uint32_t color,
                      const lv_font_t * font, lv_text_align_t align);   // 文本
 
+// ---------------- 状态反馈 ----------------
+// 给按钮挂上"按下变亮一档 / 禁用变灰"的本地样式。
+// 以前只靠默认主题的 color_filter 把按钮压暗 35，在深色底上几乎看不出变化，
+// 手指按下去没有反馈。这里改成【按下变亮】，并且把主题那个压暗滤镜关掉。
+// uik_btn() / uik_menu_row*() 内部已经调用，手工建的按钮才需要自己调。
+void uik_btn_states(lv_obj_t * btn, uint32_t base);
+
+// 输入框的焦点环：获得焦点时描边变主色并加粗到 2px。
+// 触摸模式下 LVGL 不会自动加 LV_STATE_FOCUSED（那需要 indev group），
+// 所以这里自己挂一对 FOCUSED/DEFOCUSED 回调，用 LV_STATE_USER_1 当"焦点"标记。
+// uik_ta() 内部已经调用。
+void uik_ta_focus_ring(lv_obj_t * ta);
+
+// ---------------- 复杂控件的统一皮肤 ----------------
+// 软键盘弹起来占半屏，默认主题给的是 LVGL 自带的深灰蓝，和本工程的
+// 配色对不上。这里统一成"底色 BG / 键帽 SURFACE / 按下 SURFACE_HI"。
+void uik_keyboard(lv_obj_t * kb);
+
+// lv_list 的容器与行样式：默认主题给每行 10px 内边距，240 行高的屏上
+// 一屏只能看到 2~3 行。压到 5px 后同样的空间能多看一倍。
+void uik_list(lv_obj_t * list);
+void uik_list_row(lv_obj_t * row);
+
 // ---------------- 菜单行 ----------------
-// 用于主菜单之类"整行可点"的条目；返回该行按钮
+// 整行可点的条目；返回该行按钮。text 里可以自带图标符号（旧用法），
+// 行内第一个子对象是文字标签。新代码请用 uik_menu_row_icon()。
 lv_obj_t * uik_menu_row(lv_obj_t * parent, int x, int y, int w, int h,
                         const char * text, uint32_t bg,
                         lv_event_cb_t cb, void * user_data);
+
+// 带图标徽章的菜单行（推荐）：
+//      [徽章] 标题                                   ›
+//   徽章是 accent 色的圆角小方块，里面放深色符号；标题用 TITLE 字号。
+//   title_out 回传标题标签 —— 旧代码里 ui_LabelN 指的就是它，
+//   不要再用 lv_obj_get_child(row, 0) 猜索引（徽章会把索引顶掉）。
+lv_obj_t * uik_menu_row_icon(lv_obj_t * parent, int x, int y, int w, int h,
+                             const char * symbol, const char * title,
+                             uint32_t accent, uint32_t bg,
+                             lv_event_cb_t cb, void * user_data,
+                             lv_obj_t ** title_out);
+
+// 图标徽章本体（单独用也行，例如片内温度卡片）
+lv_obj_t * uik_badge(lv_obj_t * parent, int x, int y, int size,
+                     const char * symbol, uint32_t accent);
+
+// 卡片顶部的强调小色条：宽 w、高 3、圆角，给卡片"点一下身份色"
+lv_obj_t * uik_accent_bar(lv_obj_t * parent, int x, int y, int w, uint32_t accent);
 
 #ifdef __cplusplus
 } /*extern "C"*/

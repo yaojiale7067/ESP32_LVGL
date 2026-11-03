@@ -144,18 +144,18 @@ void ui_ble_set_status(void)
     if (!ble_ready) {
         snprintf(buf, sizeof(buf), LV_SYMBOL_BULLET " BLE off");
         lv_label_set_text(ui_ble_status_label, buf);
-        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(0xFF8888), LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(UIK_C_ERR_TEXT), LV_STATE_DEFAULT);
         return;
     }
     if (g_bleConnected) {
         snprintf(buf, sizeof(buf), LV_SYMBOL_BULLET " Connected  %s  RX %u / TX %u",
                  g_blePeerAddr, (unsigned)g_bleRxTotal, (unsigned)tx_total);
         lv_label_set_text(ui_ble_status_label, buf);
-        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(0x88FF88), LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(UIK_C_OK_TEXT), LV_STATE_DEFAULT);
     } else {
         snprintf(buf, sizeof(buf), LV_SYMBOL_BULLET " Advertising as %s", BLE_DEVICE_NAME);
         lv_label_set_text(ui_ble_status_label, buf);
-        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(0xFFFF88), LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(UIK_C_WARN_TEXT), LV_STATE_DEFAULT);
     }
 }
 
@@ -341,12 +341,12 @@ extern "C" void ui_ble_on_send_requested(void)
 
     if (!bleuart_is_ready()) {
         lv_label_set_text(ui_ble_status_label, "BLE not initialized");
-        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(0xFF8888), LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(UIK_C_ERR_TEXT), LV_STATE_DEFAULT);
         return;
     }
     if (!bleuart_is_connected()) {
         lv_label_set_text(ui_ble_status_label, "Not connected - pair first");
-        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(0xFF8888), LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(UIK_C_ERR_TEXT), LV_STATE_DEFAULT);
         return;
     }
 

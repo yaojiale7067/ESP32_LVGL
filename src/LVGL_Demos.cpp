@@ -134,26 +134,27 @@ static void ui_set_status(const char* text, uint32_t color) {
     lv_obj_set_style_text_color(ui_status_label, lv_color_hex(color), LV_STATE_DEFAULT);
 }
 
-// ---------------------------------------------------------------------------
-//  只在文本真的变了才写标签
-// ---------------------------------------------------------------------------
-//  lv_label_set_text() 第一件事就是 lv_obj_invalidate()，哪怕传进去的字符串和
-//  现在完全一样，也会把这块区域重新绘一遍 → 重新走一次 setAddrWindow + pushColors
-//  → 又一次 SPI 写入。而面板自己一直在扫描 GRAM，只要 SPI 写入和扫描在时间上
-//  重叠，写到的那个位置就会在那一次可见帧里出现「上半是新的、下半是旧的」的缝。
-//
-//  温湿度屏上只有三个小标签会变，而且 DHT11 数值几秒到几分钟才动一次。如果每秒
-//  无条件重设这三个标签，屏幕上就永远存在周期性 SPI 写入，缝也就一直有概率出现，
-//  位置随写入块走 —— 片内温度在屏幕下方，所以看起来就是「底下有点撕裂」。
-//
-//  先比较、后写入：值没变就一个像素都不发，静态界面彻底没有写入，撕裂概率归零。
-// ---------------------------------------------------------------------------
-static void label_set_text_if_changed(lv_obj_t* lbl, const char* text)
-{
+// lv_label_set_text() 一进来就调 lv_obj_invalidate()，哪怕传进去的字符串
+// 和现在显示的完全一样。定时器每秒无条件刷三个标签，就会在屏幕底部产生
+// 周期性的 SPI 重绘区域 —— 在 ILI9341（没有 TE 同步）上表现为"底部偶尔撕裂"。
+// 所以先比一下，没变就不写。
+static void label_set_text_if_changed(lv_obj_t* lbl, const char* text) {
     if (lbl == NULL || text == NULL) return;
     const char* cur = lv_label_get_text(lbl);
     if (cur != NULL && strcmp(cur, text) == 0) return;
     lv_label_set_text(lbl, text);
+}
+
+// lv_obj_set_style_text_color() 走的是 lv_obj_refresh_style()，
+// 而它内部会 invalidate **两次**。同样需要"值没变就不写"。
+// 比较时两边都过一遍 lv_color_to32：屏幕是 16 位色深(5-6-5)，
+// 直接拿 24 位的 0xRRGGBB 和取出来的值比会因为量化误差永远不相等，
+// 于是每次都会写一次样式 —— 等于没起到去抖的作用。
+static void label_set_color_if_changed(lv_obj_t* lbl, uint32_t rgb) {
+    if (lbl == NULL) return;
+    lv_color_t cur = lv_obj_get_style_text_color(lbl, LV_PART_MAIN);
+    if (lv_color_to32(cur) == lv_color_to32(lv_color_hex(rgb))) return;
+    lv_obj_set_style_text_color(lbl, lv_color_hex(rgb), LV_STATE_DEFAULT);
 }
 
 static bool is_jpeg_file(const String& filename) {
@@ -218,7 +219,6 @@ void update_dht11_display() {
 
 static unsigned long last_chip_read_ms = 0;
 static float         last_chip_temp    = NAN;
-static uint32_t      s_chip_color      = UIK_C_TEXT;   // 当前已应用的文字颜色，避免重复重绘
 
 static bool chip_temp_read_cached(float* out) {
     unsigned long now = millis();
@@ -239,20 +239,14 @@ static void update_chip_temp_display(void) {
     if (ui_dht11_chip == NULL) return;
     float c;
     if (!chip_temp_read_cached(&c)) {
-        label_set_text_if_changed(ui_dht11_chip, "--.- °C");
+        label_set_text_if_changed(ui_dht11_chip, "--.- \xC2\xB0" "C");
         return;
     }
     char buf[24];
-    snprintf(buf, sizeof(buf), "%.1f °C", c);
+    snprintf(buf, sizeof(buf), "%.1f \xC2\xB0" "C", c);
     label_set_text_if_changed(ui_dht11_chip, buf);
     // 超过 70°C 变红提醒（ESP32-S3 结温上限约 125°C，但 70°C 已偏高）
-    // set_style_text_color 同样会 lv_obj_invalidate，所以也要先比较再写，
-    // 否则每 5 秒一次无条件重绘，屏幕上还是没有安静的时候。
-    uint32_t want = (c >= 70.0f) ? UIK_C_ERR_TEXT : UIK_C_TEXT;
-    if (want != s_chip_color) {
-        s_chip_color = want;
-        lv_obj_set_style_text_color(ui_dht11_chip, lv_color_hex(want), LV_STATE_DEFAULT);
-    }
+    label_set_color_if_changed(ui_dht11_chip, c >= 70.0f ? UIK_C_ERR_TEXT : UIK_C_TEXT);
 }
 
 // 时区与校时（东八区）：屏幕时钟和串口的 date 命令共用同一套设置
@@ -345,12 +339,11 @@ void dht_timer_cb(lv_timer_t* timer) {
 
 // 保证温湿度标签是干净的占位符；函数名保留给 original_setup() 的调用点。
 void fix_dht11_label_display() {
-    label_set_text_if_changed(ui_Labeltemp, "--");
-    label_set_text_if_changed(ui_Labelrh,   "--");
+    if (ui_Labeltemp != NULL) lv_label_set_text(ui_Labeltemp, "--");
+    if (ui_Labelrh   != NULL) lv_label_set_text(ui_Labelrh,   "--");
     if (ui_dht11_chip != NULL) {
-        label_set_text_if_changed(ui_dht11_chip, "--.- °C");
-        s_chip_color = UIK_C_TEXT;
-        lv_obj_set_style_text_color(ui_dht11_chip, lv_color_hex(s_chip_color),
+        lv_label_set_text(ui_dht11_chip, "--.- °C");
+        lv_obj_set_style_text_color(ui_dht11_chip, lv_color_hex(UIK_C_TEXT),
                                     LV_STATE_DEFAULT);
     }
 }
@@ -424,7 +417,7 @@ extern "C" void file_set_mode_copy(void)
 {
     copy_mode = true;
     delete_mode = false;
-    ui_set_status("Copy mode: tap a file to copy it", 0x88FF88);
+    ui_set_status("Copy mode: tap a file to copy it", UIK_C_OK_TEXT);
     schedule_file_list_update(1);
 }
 
@@ -432,7 +425,7 @@ extern "C" void file_set_mode_delete(void)
 {
     copy_mode = false;
     delete_mode = true;
-    ui_set_status("Delete mode: tap a file/folder to delete", 0xFF8888);
+    ui_set_status("Delete mode: tap a file/folder to delete", UIK_C_ERR_TEXT);
     schedule_file_list_update(1);
 }
 
@@ -443,7 +436,7 @@ static String selected_txt_path = "";
 extern "C" void file_send_selected(void)
 {
     if (selected_txt_path.length() == 0) {
-        ui_set_status("Select a .txt file first", 0xFFFF88);
+        ui_set_status("Select a .txt file first", UIK_C_WARN_TEXT);
         return;
     }
     send_txt_via_serial(selected_txt_path.c_str());
@@ -452,7 +445,7 @@ extern "C" void file_send_selected(void)
 extern "C" void file_edit_selected(void)
 {
     if (selected_txt_path.length() == 0) {
-        ui_set_status("Select a .txt file first", 0xFFFF88);
+        ui_set_status("Select a .txt file first", UIK_C_WARN_TEXT);
         return;
     }
     // 复用"新建文件"那套编辑器（文本区 + 键盘 + X 键保存）
@@ -462,7 +455,7 @@ extern "C" void file_edit_selected(void)
 extern "C" void file_paste_here(void)
 {
     if (!has_copied) {
-        ui_set_status("Nothing to paste. Copy a file first.", 0xFF8888);
+        ui_set_status("Nothing to paste. Copy a file first.", UIK_C_ERR_TEXT);
         return;
     }
     paste_file(current_path.c_str());
@@ -517,13 +510,12 @@ void update_file_list_now() {
     lv_obj_t* list = lv_list_create(scroll_panel);
     lv_obj_set_size(list, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_align(list, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_set_style_bg_color(list, lv_color_hex(UIK_C_SURFACE), LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(list, 0, LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_all(list, 0, LV_STATE_DEFAULT);
+    uik_list(list);      // 统一底色/内边距/滚动条（详见 ui_kit.c）
 
     // 粘贴入口做成列表首行（底部再放第三个按钮就得压字号，纵向空间不够）
     if (has_copied) {
         lv_obj_t* paste_row = lv_list_add_btn(list, LV_SYMBOL_PASTE, " Paste Here");
+        uik_list_row(paste_row);
         lv_obj_set_style_bg_color(paste_row, lv_color_hex(UIK_C_SUCCESS), LV_STATE_DEFAULT);
         lv_obj_add_event_cb(paste_row, [](lv_event_t* e) {
             (void)e;
@@ -533,6 +525,7 @@ void update_file_list_now() {
 
     if (current_path != "/") {
         lv_obj_t* back_btn = lv_list_add_btn(list, LV_SYMBOL_LEFT, ".. (Parent)");
+        uik_list_row(back_btn);
         lv_obj_add_event_cb(back_btn, [](lv_event_t* e) {
             (void)e;
             if (current_path == "/") return;
@@ -555,9 +548,12 @@ void update_file_list_now() {
             else if (is_txt_file(name))  display_name = name + " [TXT]";
         }
         lv_obj_t* item_btn = lv_list_add_btn(list, symbol, display_name.c_str());
+        uik_list_row(item_btn);      // 紧凑行高 + 统一按下反馈 + 长文件名截断
         lv_obj_set_user_data(item_btn, (void*)(intptr_t)i);
-        if (copy_mode && !is_dir_item) lv_obj_set_style_bg_color(item_btn, lv_color_hex(0x336633), LV_STATE_DEFAULT);
-        else if (delete_mode)          lv_obj_set_style_bg_color(item_btn, lv_color_hex(0x663333), LV_STATE_DEFAULT);
+        // 模式指示色：暗一档的同色系，不用饱和的 0x336633 / 0x663333。
+        // 饱和色在深色列表上会跳出来，看着像"已选中"而不是"当前处于某模式"。
+        if (copy_mode && !is_dir_item) lv_obj_set_style_bg_color(item_btn, lv_color_hex(0x1F4032), LV_STATE_DEFAULT);
+        else if (delete_mode)          lv_obj_set_style_bg_color(item_btn, lv_color_hex(0x4A2222), LV_STATE_DEFAULT);
         // 当前选中的 txt 高亮成蓝色
         else if (selected_txt_path.length() > 0) {
             String this_path = (current_path == "/") ? ("/" + name) : (current_path + "/" + name);
@@ -602,7 +598,7 @@ void update_file_list_now() {
                 selected_txt_path = full_path;
                 char msg[128];
                 snprintf(msg, sizeof(msg), "Selected: %s", name.c_str());
-                ui_set_status(msg, 0x88FF88);
+                ui_set_status(msg, UIK_C_OK_TEXT);
                 schedule_file_list_update(1);      // 刷新高亮和按钮状态
             }
         }, LV_EVENT_CLICKED, NULL);
@@ -628,14 +624,14 @@ void refresh_file_list_cb(lv_event_t* e) {
     if (!sd_initialized) {
         // SD 没挂上时，点刷新可以重试挂载
         if (!storage_mount()) {
-            ui_set_status("SD mount failed", 0xFF8888);
+            ui_set_status("SD mount failed", UIK_C_ERR_TEXT);
             update_file_list_now();
             return;
         }
     }
     read_directory(current_path.c_str());
     schedule_file_list_update(1);
-    ui_set_status("Refreshed", 0x88FF88);
+    ui_set_status("Refreshed", UIK_C_OK_TEXT);
 }
 
 // 新建文件
@@ -659,10 +655,10 @@ static void newfile_save_from_textarea() {
         file.print(text);
         file.close();
         Serial.printf("Saved: %s (%u bytes)\n", current_edit_path.c_str(), (unsigned)strlen(text));
-        ui_set_status("File saved!", 0x88FF88);
+        ui_set_status("File saved!", UIK_C_OK_TEXT);
     } else {
         Serial.printf("Failed to save: %s\n", current_edit_path.c_str());
-        ui_set_status("Save failed!", 0xFF8888);
+        ui_set_status("Save failed!", UIK_C_ERR_TEXT);
     }
     SD_UNLOCK();
 }
@@ -683,60 +679,67 @@ void show_newfile_editor(const String& path) {
     creating_new_file = true;
     current_edit_path = path;
 
+    // ---- 编辑器浮层 ----
+    // 这一层以前是硬编码的一套配色（0x1E1E1E / 0x2D2D2D / 0xFF5555 / 0x555555），
+    // 和主界面的 ui_kit 规范不是一路，从文件管理器点进来像切到了另一个软件。
+    // 现在统一走 ui_kit：容器=屏幕底色，标题栏=面板色，
+    // 保存=SUCCESS 绿，输入框=uik_ta，键盘=uik_keyboard。
+    //
+    // 布局：标题栏 0..38，输入区 40..136，键盘 140..240（高 100）。
+    // 键盘这一屏用 100 而不是 UIK_KB_H(120)，因为这里要多留输入区。
+    const int kb_h = 100;
     newfile_container = lv_obj_create(lv_scr_act());
     lv_obj_set_size(newfile_container, DISP_W, DISP_H);
     lv_obj_set_pos(newfile_container, 0, 0);
-    lv_obj_set_style_bg_color(newfile_container, lv_color_hex(0x1E1E1E), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(newfile_container, lv_color_hex(UIK_C_BG), LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(newfile_container, LV_OPA_COVER, LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(newfile_container, 0, LV_STATE_DEFAULT);
     lv_obj_set_style_radius(newfile_container, 0, LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(newfile_container, 0, LV_STATE_DEFAULT);
     lv_obj_clear_flag(newfile_container, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* title_bar = lv_obj_create(newfile_container);
-    lv_obj_set_size(title_bar, DISP_W, 35);
+    lv_obj_set_size(title_bar, DISP_W, UIK_CONTENT_Y);
     lv_obj_set_pos(title_bar, 0, 0);
-    lv_obj_set_style_bg_color(title_bar, lv_color_hex(0x2D2D2D), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(title_bar, lv_color_hex(UIK_C_SURFACE), LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(title_bar, 0, LV_STATE_DEFAULT);
     lv_obj_set_style_radius(title_bar, 0, LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(title_bar, 0, LV_STATE_DEFAULT);
     lv_obj_clear_flag(title_bar, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* title_label = lv_label_create(title_bar);
     String title_text = "New File: " + path.substring(path.lastIndexOf('/') + 1);
     lv_label_set_text(title_label, title_text.c_str());
-    lv_obj_align(title_label, LV_ALIGN_LEFT_MID, 10, 0);
-    lv_obj_set_style_text_color(title_label, lv_color_hex(0xFFFFFF), LV_STATE_DEFAULT);
+    lv_label_set_long_mode(title_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(title_label, DISP_W - 2 * UIK_PAD - 68);
+    lv_obj_align(title_label, LV_ALIGN_LEFT_MID, UIK_PAD, 0);
+    lv_obj_set_style_text_font(title_label, UIK_FONT_TITLE, LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(title_label, lv_color_hex(UIK_C_TEXT), LV_STATE_DEFAULT);
 
-    lv_obj_t* close_btn = lv_btn_create(title_bar);
-    lv_obj_set_size(close_btn, 50, 30);
-    lv_obj_align(close_btn, LV_ALIGN_RIGHT_MID, -10, 0);
-    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0xFF5555), LV_STATE_DEFAULT);
-    lv_obj_set_style_radius(close_btn, 5, LV_STATE_DEFAULT);
-    lv_obj_t* close_label = lv_label_create(close_btn);
-    lv_label_set_text(close_label, "X");
-    lv_obj_center(close_label);
-    lv_obj_set_style_text_color(close_label, lv_color_hex(0xFFFFFF), LV_STATE_DEFAULT);
-    // 先保存再关闭，避免用户以为点了 X 内容还在
+    // 这个按钮是"保存并关闭"，所以直接写成 Save —— 原来是个红底 X，
+    // 用户会以为按下去内容被丢掉了。绿色 + 保存图标才说得清。
+    lv_obj_t* close_btn = uik_btn(title_bar, LV_SYMBOL_SAVE " Save",
+                                  DISP_W - UIK_PAD - 68, UIK_TOPBAR_Y, 68, UIK_TOPBAR_H,
+                                  UIK_C_SUCCESS);
+    // 先保存再关闭，避免用户以为点了关闭内容还在
     lv_obj_add_event_cb(close_btn, [](lv_event_t* e) {
         (void)e;
         newfile_save_from_textarea();
         close_newfile_editor();
     }, LV_EVENT_CLICKED, NULL);
 
-    // 高度 100：再高会被贴底 100 高的键盘盖住
-    newfile_textarea = lv_textarea_create(newfile_container);
-    lv_obj_set_size(newfile_textarea, DISP_W - 10, 100);
-    lv_obj_set_pos(newfile_textarea, 5, 40);
-    lv_textarea_set_placeholder_text(newfile_textarea, "Enter text here...");
+    uik_separator(newfile_container, 0, UIK_CONTENT_Y - 1, DISP_W);
+
+    newfile_textarea = uik_ta(newfile_container, UIK_LEFT, UIK_CONTENT_Y + 2,
+                              UIK_CONTENT_W, (DISP_H - kb_h) - UIK_CONTENT_Y - 6,
+                              "Enter text here...", false);
     lv_textarea_set_cursor_click_pos(newfile_textarea, true);
-    lv_obj_set_style_bg_color(newfile_textarea, lv_color_hex(0x2D2D2D), LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(newfile_textarea, lv_color_hex(0xFFFFFF), LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(newfile_textarea, 1, LV_STATE_DEFAULT);
-    lv_obj_set_style_border_color(newfile_textarea, lv_color_hex(0x555555), LV_STATE_DEFAULT);
 
     newfile_keyboard = lv_keyboard_create(newfile_container);
     lv_keyboard_set_textarea(newfile_keyboard, newfile_textarea);
-    lv_obj_set_size(newfile_keyboard, DISP_W, 100);
+    lv_obj_set_size(newfile_keyboard, DISP_W, kb_h);
     lv_obj_align(newfile_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    uik_keyboard(newfile_keyboard);
     lv_obj_add_event_cb(newfile_keyboard, newfile_kb_event_cb, LV_EVENT_READY,  NULL);
     lv_obj_add_event_cb(newfile_keyboard, newfile_kb_event_cb, LV_EVENT_CANCEL, NULL);
 }
@@ -766,7 +769,7 @@ extern "C" void create_new_text_file() {
 
     if (!ok) {
         Serial.printf("Failed to create file: %s\n", full_path.c_str());
-        ui_set_status("Failed to create file!", 0xFF8888);
+        ui_set_status("Failed to create file!", UIK_C_ERR_TEXT);
         return;
     }
     Serial.printf("Created file: %s\n", full_path.c_str());
@@ -827,7 +830,7 @@ void save_and_close_cb(lv_event_t* e) {
     (void)e;
     if (editor_textarea != NULL && current_edit_path.length() > 0) {
         save_json_file(current_edit_path.c_str(), String(lv_textarea_get_text(editor_textarea)));
-        ui_set_status("Saved", 0x88FF88);
+        ui_set_status("Saved", UIK_C_OK_TEXT);
     }
     close_editor();
 }
@@ -840,73 +843,78 @@ void show_json_editor(const char* path) {
 
     // 超限时只读打开，绝不提供保存入口（截断后保存会把原文件写坏）
     if (truncated) {
-        ui_set_status("File too big (>32KB), read-only", 0xFFAA44);
+        ui_set_status("File too big (>32KB), read-only", UIK_C_WARN_TEXT);
     }
     showing_editor = true;
     current_edit_path = String(path);
     if (content.length() == 0) content = "";
 
+    // ---- 编辑器浮层（与 show_newfile_editor 同一套 ui_kit 配色）----
+    // 布局：标题栏 0..38，正文 40..136，键盘 140..240（高 100）。
+    // 只读模式没有键盘，正文就一路铺到底（40..236），能看到更多内容。
+    const int kb_h = 100;
+    const int body_h = truncated ? (DISP_H - UIK_CONTENT_Y - 4)
+                                 : ((DISP_H - kb_h) - UIK_CONTENT_Y - 6);
+
     editor_container = lv_obj_create(lv_scr_act());
     lv_obj_set_size(editor_container, DISP_W, DISP_H);
     lv_obj_set_pos(editor_container, 0, 0);
-    lv_obj_set_style_bg_color(editor_container, lv_color_hex(0x1E1E1E), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(editor_container, lv_color_hex(UIK_C_BG), LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(editor_container, LV_OPA_COVER, LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(editor_container, 0, LV_STATE_DEFAULT);
     lv_obj_set_style_radius(editor_container, 0, LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(editor_container, 0, LV_STATE_DEFAULT);
     lv_obj_clear_flag(editor_container, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* title_bar = lv_obj_create(editor_container);
-    lv_obj_set_size(title_bar, DISP_W, 35);
+    lv_obj_set_size(title_bar, DISP_W, UIK_CONTENT_Y);
     lv_obj_set_pos(title_bar, 0, 0);
-    lv_obj_set_style_bg_color(title_bar, lv_color_hex(0x2D2D2D), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(title_bar, lv_color_hex(UIK_C_SURFACE), LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(title_bar, 0, LV_STATE_DEFAULT);
     lv_obj_set_style_radius(title_bar, 0, LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(title_bar, 0, LV_STATE_DEFAULT);
     lv_obj_clear_flag(title_bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 关闭键永远在最右边（56 宽）；Save 在它左边（可编辑时才有）。
+    const int BTN_W = 56;
+    const int close_x = DISP_W - UIK_PAD - BTN_W;
 
     lv_obj_t* title_label = lv_label_create(title_bar);
     lv_label_set_text(title_label, truncated ? "JSON (READ-ONLY)" : "JSON Editor");
-    lv_obj_align(title_label, LV_ALIGN_LEFT_MID, 10, 0);
-    lv_obj_set_style_text_color(title_label, lv_color_hex(truncated ? 0xFFAA44 : 0xFFFFFF), LV_STATE_DEFAULT);
+    lv_label_set_long_mode(title_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(title_label, close_x - UIK_PANEL_GAP - (truncated ? 0 : BTN_W + UIK_PANEL_GAP));
+    lv_obj_align(title_label, LV_ALIGN_LEFT_MID, UIK_PAD, 0);
+    lv_obj_set_style_text_font(title_label, UIK_FONT_TITLE, LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(title_label,
+        lv_color_hex(truncated ? UIK_C_WARN_TEXT : UIK_C_TEXT), LV_STATE_DEFAULT);
 
     if (!truncated) {
-        lv_obj_t* save_btn = lv_btn_create(title_bar);
-        lv_obj_set_size(save_btn, 50, 28);
-        lv_obj_align(save_btn, LV_ALIGN_RIGHT_MID, -65, 0);
-        lv_obj_set_style_bg_color(save_btn, lv_color_hex(0x44AA44), LV_STATE_DEFAULT);
-        lv_obj_t* save_label = lv_label_create(save_btn);
-        lv_label_set_text(save_label, "Save");
-        lv_obj_center(save_label);
-        lv_obj_set_style_text_color(save_label, lv_color_hex(0xFFFFFF), LV_STATE_DEFAULT);
+        lv_obj_t* save_btn = uik_btn(title_bar, LV_SYMBOL_SAVE " Save",
+                                     close_x - UIK_PANEL_GAP - BTN_W, UIK_TOPBAR_Y,
+                                     BTN_W, UIK_TOPBAR_H, UIK_C_SUCCESS);
         lv_obj_add_event_cb(save_btn, save_and_close_cb, LV_EVENT_CLICKED, NULL);
     }
 
-    lv_obj_t* close_btn = lv_btn_create(title_bar);
-    lv_obj_set_size(close_btn, 50, 28);
-    lv_obj_align(close_btn, LV_ALIGN_RIGHT_MID, -10, 0);
-    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0xFF5555), LV_STATE_DEFAULT);
-    lv_obj_t* close_label = lv_label_create(close_btn);
-    lv_label_set_text(close_label, "X");
-    lv_obj_center(close_label);
-    lv_obj_set_style_text_color(close_label, lv_color_hex(0xFFFFFF), LV_STATE_DEFAULT);
+    // 关闭键：这里只关不存（和新建文件那个"保存并关闭"不同），
+    // 所以用 DANGER 红 + 叉号，明确"未保存的改动会丢"。
+    lv_obj_t* close_btn = uik_btn(title_bar, LV_SYMBOL_CLOSE, close_x, UIK_TOPBAR_Y,
+                                  BTN_W, UIK_TOPBAR_H, UIK_C_DANGER);
     lv_obj_add_event_cb(close_btn, [](lv_event_t* e) { (void)e; close_editor(); },
                         LV_EVENT_CLICKED, NULL);
 
-    editor_textarea = lv_textarea_create(editor_container);
-    lv_obj_set_size(editor_textarea, DISP_W - 10, 100);
-    lv_obj_set_pos(editor_textarea, 5, 45);
+    uik_separator(editor_container, 0, UIK_CONTENT_Y - 1, DISP_W);
+
+    editor_textarea = uik_ta(editor_container, UIK_LEFT, UIK_CONTENT_Y + 2,
+                             UIK_CONTENT_W, body_h, "Edit JSON content...", false);
     lv_textarea_set_text(editor_textarea, content.c_str());
-    lv_textarea_set_placeholder_text(editor_textarea, "Edit JSON content...");
-    lv_obj_set_style_bg_color(editor_textarea, lv_color_hex(0x2D2D2D), LV_STATE_DEFAULT);
-    lv_obj_set_style_text_color(editor_textarea, lv_color_hex(0xFFFFFF), LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(editor_textarea, 1, LV_STATE_DEFAULT);
-    lv_obj_set_style_border_color(editor_textarea, lv_color_hex(0x555555), LV_STATE_DEFAULT);
 
     // 只读模式下不给键盘，物理上就没法改
     if (!truncated) {
         editor_keyboard = lv_keyboard_create(editor_container);
         lv_keyboard_set_textarea(editor_keyboard, editor_textarea);
-        lv_obj_set_size(editor_keyboard, DISP_W, 100);
+        lv_obj_set_size(editor_keyboard, DISP_W, kb_h);
         lv_obj_align(editor_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+        uik_keyboard(editor_keyboard);
         lv_obj_add_event_cb(editor_keyboard, [](lv_event_t* e) {
             if (lv_event_get_code(e) == LV_EVENT_READY) {
                 save_and_close_cb(e);
@@ -935,7 +943,7 @@ void show_jpeg_image(const char* path) {
     JRESULT jr = TJpgDec.getSdJpgSize(&w, &h, path);
     if (jr != JDR_OK || w == 0 || h == 0) {
         Serial.printf("JPEG header failed (%d): %s\n", (int)jr, path);
-        ui_set_status("Not a valid JPEG", 0xFF8888);
+        ui_set_status("Not a valid JPEG", UIK_C_ERR_TEXT);
         lv_obj_invalidate(lv_scr_act());
         lv_refr_now(NULL);
         return;
@@ -949,7 +957,7 @@ void show_jpeg_image(const char* path) {
     jr = TJpgDec.drawSdJpg(x, y, path);
     if (jr != JDR_OK) {
         Serial.printf("JPEG decode failed (%d): %s\n", (int)jr, path);
-        ui_set_status("JPEG decode failed", 0xFF8888);
+        ui_set_status("JPEG decode failed", UIK_C_ERR_TEXT);
     } else {
         // 轮询等待抬手，期间继续跑 lv_timer_handler()，界面不会假死
         bool was_down = false;
@@ -965,7 +973,7 @@ void show_jpeg_image(const char* path) {
 
     lv_obj_invalidate(lv_scr_act());
     lv_refr_now(NULL);
-    ui_set_status("Image closed", 0x88FF88);
+    ui_set_status("Image closed", UIK_C_OK_TEXT);
 }
 
 // 文件操作
@@ -1009,7 +1017,7 @@ void delete_file_or_folder(const char* path) {
     char msg[128];
     const char* base = strrchr(path, '/');
     snprintf(msg, sizeof(msg), "Deleted: %s", base ? base + 1 : path);
-    ui_set_status(msg, 0xFF8888);
+    ui_set_status(msg, UIK_C_ERR_TEXT);
 }
 
 void copy_file(const char* src_path) {
@@ -1019,19 +1027,19 @@ void copy_file(const char* src_path) {
     char msg[128];
     const char* base = strrchr(src_path, '/');
     snprintf(msg, sizeof(msg), "Copied: %s", base ? base + 1 : src_path);
-    ui_set_status(msg, 0xFFFF88);
+    ui_set_status(msg, UIK_C_WARN_TEXT);
 }
 
 void paste_file(const char* dest_dir) {
     if (!has_copied) {
-        ui_set_status("Nothing to paste. Copy a file first.", 0xFF8888);
+        ui_set_status("Nothing to paste. Copy a file first.", UIK_C_ERR_TEXT);
         return;
     }
     String filename  = copy_source_path.substring(copy_source_path.lastIndexOf('/') + 1);
     String dest_path = (String(dest_dir) == "/") ? ("/" + filename)
                                                  : (String(dest_dir) + "/" + filename);
     if (dest_path == copy_source_path) {
-        ui_set_status("Source and destination are the same", 0xFF8888);
+        ui_set_status("Source and destination are the same", UIK_C_ERR_TEXT);
         has_copied = false;
         return;
     }
@@ -1054,11 +1062,11 @@ void paste_file(const char* dest_dir) {
                       copy_source_path.c_str(), dest_path.c_str(), (unsigned)total);
         char msg[128];
         snprintf(msg, sizeof(msg), "Pasted: %s (%u bytes)", filename.c_str(), (unsigned)total);
-        ui_set_status(msg, 0x88FF88);
+        ui_set_status(msg, UIK_C_OK_TEXT);
     } else if (exists) {
-        ui_set_status("File exists! Copy cancelled.", 0xFF8888);
+        ui_set_status("File exists! Copy cancelled.", UIK_C_ERR_TEXT);
     } else {
-        ui_set_status("Copy failed (open source/dest)", 0xFF8888);
+        ui_set_status("Copy failed (open source/dest)", UIK_C_ERR_TEXT);
     }
     if (src)  src.close();
     if (dest) dest.close();
@@ -1076,7 +1084,7 @@ void paste_file(const char* dest_dir) {
 
 void send_txt_via_serial(const char* path) {
     if (tx_buffer != nullptr) {
-        ui_set_status("A transfer is already running", 0xFFAA44);
+        ui_set_status("A transfer is already running", UIK_C_WARN_TEXT);
         return;
     }
 
@@ -1084,14 +1092,14 @@ void send_txt_via_serial(const char* path) {
     File file = SD.open(path);
     if (!file) {
         SD_UNLOCK();
-        ui_set_status("Cannot open file!", 0xFF8888);
+        ui_set_status("Cannot open file!", UIK_C_ERR_TEXT);
         return;
     }
     size_t fsize = file.size();
     if (fsize == 0 || fsize > TX_MAX_BYTES) {
         file.close();
         SD_UNLOCK();
-        ui_set_status(fsize == 0 ? "Empty file" : "File too big (>256KB)", 0xFFAA44);
+        ui_set_status(fsize == 0 ? "Empty file" : "File too big (>256KB)", UIK_C_WARN_TEXT);
         return;
     }
     char* buffer = (char*)heap_caps_malloc(fsize + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -1099,7 +1107,7 @@ void send_txt_via_serial(const char* path) {
     if (buffer == nullptr) {
         file.close();
         SD_UNLOCK();
-        ui_set_status("Out of memory for TXT buffer", 0xFF8888);
+        ui_set_status("Out of memory for TXT buffer", UIK_C_ERR_TEXT);
         return;
     }
     size_t got = file.read((uint8_t*)buffer, fsize);
@@ -1117,7 +1125,7 @@ void send_txt_via_serial(const char* path) {
     Serial.println("========================================");
     Serial.printf("File: %s (%u bytes)\n", path, (unsigned)got);
     Serial.println("----------------------------------------");
-    ui_set_status("Sending over serial...", 0xFFFF00);
+    ui_set_status("Sending over serial...", UIK_C_WARN_TEXT);
 }
 
 void pump_txt_transfer() {
@@ -1133,7 +1141,7 @@ void pump_txt_transfer() {
         last_report = tx_sent;
         char msg[64];
         snprintf(msg, sizeof(msg), "Sending %u/%u", (unsigned)tx_sent, (unsigned)tx_len);
-        ui_set_status(msg, 0xFFFF00);
+        ui_set_status(msg, UIK_C_WARN_TEXT);
     }
 
     if (tx_sent >= tx_len) {
@@ -1144,7 +1152,7 @@ void pump_txt_transfer() {
         char msg[96];
         snprintf(msg, sizeof(msg), "Sent: %s (%u bytes)",
                  tx_file.substring(tx_file.lastIndexOf('/') + 1).c_str(), (unsigned)tx_len);
-        ui_set_status(msg, 0x88FF88);
+        ui_set_status(msg, UIK_C_OK_TEXT);
         free(tx_buffer);
         tx_buffer  = nullptr;
         tx_len     = 0;
@@ -1310,11 +1318,11 @@ void wifi_free_list_user_data() {
 
 void wifi_scan_request() {
     if (wifi_scan_state != WSCAN_IDLE) {
-        ui_set_status_ex("Scan already running...", 0xFFFF00);
+        ui_set_status_ex("Scan already running...", UIK_C_WARN_TEXT);
         return;
     }
     if (!wifiScanRequestQueue || !wifiScanResultQueue) {
-        ui_set_status_ex("WiFi queues not ready", 0xFF8888);
+        ui_set_status_ex("WiFi queues not ready", UIK_C_ERR_TEXT);
         return;
     }
 
@@ -1326,12 +1334,12 @@ void wifi_scan_request() {
 
     ScanRequestMsg_t req = { true };
     if (xQueueSend(wifiScanRequestQueue, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
-        ui_set_status_ex("Scan request failed", 0xFF8888);
+        ui_set_status_ex("Scan request failed", UIK_C_ERR_TEXT);
         return;
     }
     wifi_scan_state = WSCAN_WAIT_RESULT;
     wifi_scan_start = millis();
-    ui_set_status_ex("Scanning...", 0xFFFF00);   // 只发请求，立刻返回
+    ui_set_status_ex("Scanning...", UIK_C_WARN_TEXT);   // 只发请求，立刻返回
 }
 
 void wifi_scan_poll() {
@@ -1339,7 +1347,7 @@ void wifi_scan_poll() {
 
     if (millis() - wifi_scan_start > WIFI_SCAN_TIMEOUT_MS) {
         wifi_scan_state = WSCAN_IDLE;
-        ui_set_status_ex("Scan timeout", 0xFF8888);
+        ui_set_status_ex("Scan timeout", UIK_C_ERR_TEXT);
         return;
     }
 
@@ -1348,7 +1356,7 @@ void wifi_scan_poll() {
     wifi_scan_state = WSCAN_IDLE;
 
     if (result.count <= 0) {
-        ui_set_status_ex("No networks found", 0xFF8888);
+        ui_set_status_ex("No networks found", UIK_C_ERR_TEXT);
         return;
     }
 
@@ -1358,6 +1366,7 @@ void wifi_scan_poll() {
         for (int i = 0; i < result.count; i++) {
             if (result.ssids[i][0] == '\0') continue;
             lv_obj_t* btn = lv_list_add_btn(ui_wifi_list, LV_SYMBOL_WIFI, result.ssids[i]);
+            uik_list_row(btn);       // 紧凑行高 + 统一按下反馈
             char* ssid_copy = (char*)malloc(strlen(result.ssids[i]) + 1);
             if (ssid_copy) strcpy(ssid_copy, result.ssids[i]);
             lv_obj_set_user_data(btn, ssid_copy);
@@ -1366,23 +1375,32 @@ void wifi_scan_poll() {
                 const char* ssid = (const char*)lv_obj_get_user_data(b);
                 if (ssid == NULL) return;
                 selected_ssid = String(ssid);
-                ui_set_status_ex(ssid, 0xFFFFFF);
+                // 选中的网络高亮成主色 —— 否则用户点完不知道该看哪一行，
+                // 只能从底部状态栏那串 SSID 去比对。
+                lv_obj_t* list = lv_obj_get_parent(b);
+                uint32_t n = lv_obj_get_child_cnt(list);
+                for (uint32_t k = 0; k < n; k++) {
+                    lv_obj_t* row = lv_obj_get_child(list, k);
+                    lv_obj_set_style_bg_color(row,
+                        lv_color_hex(row == b ? UIK_C_PRIMARY : UIK_C_SURFACE), LV_STATE_DEFAULT);
+                }
+                ui_set_status_ex(ssid, UIK_C_TEXT);
             }, LV_EVENT_CLICKED, NULL);
         }
     }
     char msg[48];
     snprintf(msg, sizeof(msg), "Found %d networks. Select one.", result.count);
-    ui_set_status_ex(msg, 0x88FF88);
+    ui_set_status_ex(msg, UIK_C_OK_TEXT);
 }
 
 void wifi_connect_to_selected() {
     if (selected_ssid.length() == 0) {
-        ui_set_status_ex("No network selected", 0xFF8888);
+        ui_set_status_ex("No network selected", UIK_C_ERR_TEXT);
         return;
     }
     const char* password = ui_wifi_password_ta ? lv_textarea_get_text(ui_wifi_password_ta) : "";
     if (password == NULL || strlen(password) == 0) {
-        ui_set_status_ex("Password cannot be empty", 0xFF8888);
+        ui_set_status_ex("Password cannot be empty", UIK_C_ERR_TEXT);
         return;
     }
 
@@ -1392,11 +1410,11 @@ void wifi_connect_to_selected() {
     strncpy(cfg.password, password, sizeof(cfg.password) - 1);
 
     if (xQueueSend(wifiConfigQueue, &cfg, pdMS_TO_TICKS(500)) != pdTRUE) {
-        ui_set_status_ex("Failed to send config", 0xFF8888);
+        ui_set_status_ex("Failed to send config", UIK_C_ERR_TEXT);
         return;
     }
     wifi_save_config_to_sd(cfg.ssid, cfg.password);
-    ui_set_status_ex("Config saved, connecting in background...", 0x88FF88);
+    ui_set_status_ex("Config saved, connecting in background...", UIK_C_OK_TEXT);
     if (ui_wifi_password_ta) lv_textarea_set_text(ui_wifi_password_ta, "");
 }
 
@@ -1551,7 +1569,7 @@ void original_setup() {
 #endif
 
     if (ui_dht11 != NULL) {
-        lv_scr_load(ui_dht11);
+        uik_screen_load(ui_dht11);
         delay(100);
     }
 

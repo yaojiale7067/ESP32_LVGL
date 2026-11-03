@@ -1,12 +1,22 @@
 // ============================================================================
 //  ui_SerialTool.c - 串口调试工具屏
-//  统一后的样式：顶栏(返回) + 接收框 + 发送行 + 隐藏键盘
-//  布局（320x240，键盘占底部 120）：
-//      顶栏          y 2~32
-//      RX 标签       y 36
-//      RX 文本框     x 10~310 / y 50~166（绿字深底，可滚动）
-//      发送行        x 10~200 输入框 + x 220~310 Send，y 174~204
-//      键盘          y 120~239（隐藏，聚焦输入框时弹出）
+//
+//  布局（320x240）：
+//      0..37    顶栏：[← Back]        Serial Tool
+//      40..54   小节标题 "RECEIVED"
+//      56..200  接收区（凹陷底色 + 绿字，可滚动）
+//      206..236 发送行：[输入框 212x30]  [Send 92x30]
+//
+//  键盘弹出时（占底部 120px）重排，输入框始终在键盘上方：
+//      40..82   接收区（压到两行高）—— 小节标题隐藏
+//      86..116  发送行
+//
+//  相比旧版：
+//    1) 键盘弹出不再盖住输入框（旧版发送行固定 y=174，键盘 120..239 直接压住它，
+//       打字时看不到自己输入了什么）。
+//    2) 接收区加了一行小节标题，说明这块区域是什么；不再是无名黑框。
+//    3) 左右留白统一 ui_kit 的 4，与其它屏对齐。
+//    4) 键盘改成 uik_keyboard() 配色。
 //
 //  对外符号保留：ui_labelrx（业务层会往里写串口命令回显）、
 //  ui_TextArea1 / ui_Keyboard1（键盘事件函数依赖）
@@ -28,18 +38,56 @@ lv_obj_t * ui_Button6 = NULL;      // 返回
 lv_obj_t * ui_Label9 = NULL;
 lv_obj_t * ui_Spinner1 = NULL;     // 保留符号（新布局里不再使用）
 
+static lv_obj_t * sr_section_label = NULL;
+static lv_obj_t * sr_send_btn = NULL;
+
+// ---- 几何 ----------------------------------------------------------------
+#define SR_SEC_Y       (UIK_CONTENT_Y + 2)              // 40：小节标题
+#define SR_RX_Y        (UIK_CONTENT_Y + 18)             // 56
+#define SR_RX_H        144                              // 56..200
+#define SR_SEND_Y      206
+#define SR_SEND_H      30
+#define SR_SEND_W      92
+#define SR_TA_W        (UIK_CONTENT_W - UIK_PANEL_GAP - SR_SEND_W)   // 212
+// 键盘弹起时
+#define SR_RX_Y_KB     (UIK_CONTENT_Y + 2)              // 40
+#define SR_SEND_Y_KB   (UIK_KB_TOP - SR_SEND_H - 4)     // 86
+#define SR_RX_H_KB     (SR_SEND_Y_KB - 4 - SR_RX_Y_KB)  // 42
+
+// 键盘弹起/收起的两套坐标
+static void sr_layout_keyboard_up(bool up)
+{
+    if (ui_PanelRX) {
+        lv_obj_align(ui_PanelRX, LV_ALIGN_TOP_LEFT, UIK_LEFT, up ? SR_RX_Y_KB : SR_RX_Y);
+        lv_obj_set_height(ui_PanelRX, up ? SR_RX_H_KB : SR_RX_H);
+    }
+    if (ui_TextArea1) {
+        lv_obj_align(ui_TextArea1, LV_ALIGN_TOP_LEFT, UIK_LEFT, up ? SR_SEND_Y_KB : SR_SEND_Y);
+    }
+    if (sr_send_btn) {
+        lv_obj_align(sr_send_btn, LV_ALIGN_TOP_RIGHT, -UIK_PAD, up ? SR_SEND_Y_KB : SR_SEND_Y);
+    }
+    // 键盘占掉了小节标题那条，收起它免得压在接收区上
+    if (sr_section_label) {
+        if (up) lv_obj_add_flag(sr_section_label, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_clear_flag(sr_section_label, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 // 键盘绑定与显示/隐藏
 static void ta_focus_cb(lv_event_t * e)
 {
     (void)e;
     if (ui_Keyboard1 == NULL) return;
     lv_keyboard_set_textarea(ui_Keyboard1, ui_TextArea1);
+    sr_layout_keyboard_up(true);
     lv_obj_clear_flag(ui_Keyboard1, LV_OBJ_FLAG_HIDDEN);
 }
 static void ta_defocus_cb(lv_event_t * e)
 {
     (void)e;
     if (ui_Keyboard1) lv_obj_add_flag(ui_Keyboard1, LV_OBJ_FLAG_HIDDEN);
+    sr_layout_keyboard_up(false);
 }
 
 // ---- 原有事件（保持函数签名不变，供 ui.h 链接）-----------------------------
@@ -49,6 +97,7 @@ void ui_event_Keyboard1(lv_event_t * e)
 
     if (event_code == LV_EVENT_READY || event_code == LV_EVENT_CANCEL) {
         if (ui_Keyboard1) lv_obj_add_flag(ui_Keyboard1, LV_OBJ_FLAG_HIDDEN);
+        sr_layout_keyboard_up(false);
         return;
     }
 
@@ -90,6 +139,7 @@ static void send_cb(lv_event_t * e)
     serial_send((char *)data);
     lv_textarea_set_text(ui_TextArea1, "");
     if (ui_Keyboard1) lv_obj_add_flag(ui_Keyboard1, LV_OBJ_FLAG_HIDDEN);
+    sr_layout_keyboard_up(false);
 }
 
 void ui_SerialTool_screen_init(void)
@@ -100,15 +150,17 @@ void ui_SerialTool_screen_init(void)
     uik_topbar(ui_SerialTool, "Serial Tool", NULL, back_cb, NULL, &ui_Button6, NULL);
     if (ui_Button6 != NULL) ui_Label9 = lv_obj_get_child(ui_Button6, 0);
 
-    // ---- 接收区 ----
-    lv_obj_t * rx_title = uik_label(ui_SerialTool, LV_SYMBOL_DOWNLOAD " Received",
-                                    UIK_PAD, 34, UIK_C_TEXT_DIM,
-                                    UIK_FONT_HINT, LV_TEXT_ALIGN_LEFT);
-    (void)rx_title;
+    // ---- 小节标题 ----
+    // 一行小字说明"下面是收到的数据"。旧版这里放的是
+    // LV_SYMBOL_DOWNLOAD " Received"，图标和文字挤在一起且没有对齐基准。
+    sr_section_label = uik_label(ui_SerialTool, "RECEIVED", UIK_LEFT, SR_SEC_Y,
+                                 UIK_C_TEXT_DIM, UIK_FONT_HINT, LV_TEXT_ALIGN_LEFT);
 
-    ui_PanelRX = uik_panel(ui_SerialTool, UIK_PAD, 50, UIK_W - 2 * UIK_PAD, 116);
-    lv_obj_set_style_bg_color(ui_PanelRX, lv_color_hex(UIK_C_DARK), LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_all(ui_PanelRX, 4, LV_STATE_DEFAULT);
+    // ---- 接收区 ----
+    // 用 uik_panel 做外框（圆角+1px 暗边），内部是凹陷底色 + 绿字。
+    ui_PanelRX = uik_panel(ui_SerialTool, UIK_LEFT, SR_RX_Y, UIK_CONTENT_W, SR_RX_H);
+    lv_obj_set_style_bg_color(ui_PanelRX, lv_color_hex(UIK_C_SUNKEN), LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(ui_PanelRX, 5, LV_STATE_DEFAULT);
 
     ui_labelrx = lv_label_create(ui_PanelRX);
     lv_obj_set_width(ui_labelrx, LV_PCT(100));
@@ -119,20 +171,22 @@ void ui_SerialTool_screen_init(void)
     lv_obj_align(ui_labelrx, LV_ALIGN_TOP_LEFT, 0, 0);
 
     // ---- 发送行 ----
-    ui_TextArea1 = uik_ta(ui_SerialTool, UIK_PAD, 174, 190, 30,
+    ui_TextArea1 = uik_ta(ui_SerialTool, UIK_LEFT, SR_SEND_Y, SR_TA_W, SR_SEND_H,
                           "Type and press Send...", true);
     lv_textarea_set_max_length(ui_TextArea1, 200);
     lv_obj_add_event_cb(ui_TextArea1, ta_focus_cb,   LV_EVENT_FOCUSED,   NULL);
     lv_obj_add_event_cb(ui_TextArea1, ta_defocus_cb, LV_EVENT_DEFOCUSED, NULL);
 
-    lv_obj_t * send = uik_btn(ui_SerialTool, LV_SYMBOL_UPLOAD " Send",
-                              UIK_W - UIK_PAD - 90, 174, 90, 30, UIK_C_SUCCESS);
-    lv_obj_add_event_cb(send, send_cb, LV_EVENT_CLICKED, NULL);
+    sr_send_btn = uik_btn(ui_SerialTool, LV_SYMBOL_UPLOAD " Send",
+                          UIK_W - UIK_PAD - SR_SEND_W, SR_SEND_Y,
+                          SR_SEND_W, SR_SEND_H, UIK_C_SUCCESS);
+    lv_obj_add_event_cb(sr_send_btn, send_cb, LV_EVENT_CLICKED, NULL);
 
     // ---- 键盘 ----
     ui_Keyboard1 = lv_keyboard_create(ui_SerialTool);
     lv_obj_set_size(ui_Keyboard1, UIK_W, UIK_KB_H);
     lv_obj_align(ui_Keyboard1, LV_ALIGN_BOTTOM_MID, 0, 0);
+    uik_keyboard(ui_Keyboard1);                 // 统一配色
     lv_keyboard_set_textarea(ui_Keyboard1, ui_TextArea1);
     lv_obj_add_flag(ui_Keyboard1, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(ui_Keyboard1, ui_event_Keyboard1, LV_EVENT_ALL, NULL);
@@ -150,4 +204,6 @@ void ui_SerialTool_screen_destroy(void)
     ui_Button6 = NULL;
     ui_Label9 = NULL;
     ui_Spinner1 = NULL;
+    sr_section_label = NULL;
+    sr_send_btn = NULL;
 }
