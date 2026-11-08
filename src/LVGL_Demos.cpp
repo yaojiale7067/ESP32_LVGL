@@ -26,6 +26,7 @@
 #include "ui_test/screens/ui_file.h"
 #include "ui_test/screens/ui_wifi.h"
 #include "ui_test/screens/ui_wscan.h"        // 信道占用分析屏
+#include "ui_test/screens/ui_relay.h"        // 继电器（GPIO41）控制屏
 #if ENABLE_BLE
 #include "ui_test/screens/ui_ble.h"
 #endif
@@ -33,6 +34,13 @@
 #define DHTPIN  7
 #define DHTTYPE DHT11
 #define SD_CS   4
+
+// 继电器：GPIO41。★ 高电平触发（ON = 引脚拉高吸合）。
+// 若换的是低电平触发的模块（很多蓝色小板 IN 拉低才吸合），
+// 把 RELAY_ACTIVE_LEVEL 改成 LOW 即可，其余逻辑不动。
+// GPIO41 在本工程没有其它用途：TFT 用 8..13，SD_CS=4，DHT=7，触摸 I2C=1/2、RST=42。
+#define RELAY_PIN            41
+#define RELAY_ACTIVE_LEVEL   HIGH
 
 // POSIX TZ 字符串的符号是反的："CST-8" 才是 UTC+8，写成 "CST+8" 会变成 UTC-8
 #define TZ_UTC8  "CST-8"
@@ -1703,6 +1711,47 @@ void ui_wscan_on_screen_ready(void) {
 } /* extern "C" */
 
 
+// ============================================================================
+//  继电器控制（GPIO41，屏体在 ui_test/screens/ui_relay.c）
+//  ----------------------------------------------------------------------------
+//  ★ 状态缓存 relay_hw_on 是"软件视角的真相"：GPIO41 是纯输出，
+//    digitalRead 读回的是引脚电平不是继电器是否真的吸合，
+//    所以维护一个自己的 bool，写引脚和更新缓存必须在同一个函数里完成，
+//    界面同步（ui_relay_set_state）只信这个缓存。
+//  ★ 上电默认 OFF：继电器控制的是实体设备，复位/重启后不应该
+//    "恢复到上次状态"——没人知道上次是什么、设备现在受不受得了。
+//    要记忆状态的话应该显式存 SD，目前不做。
+// ============================================================================
+static bool relay_hw_on = false;
+
+static void relay_hw_init() {
+    pinMode(RELAY_PIN, OUTPUT);
+    // 先写电平再切 OUTPUT 也行，但 ESP32 的 pinMode(OUTPUT) 不保证初始电平，
+    // 所以紧跟一次 digitalWrite 把状态钉死在 OFF。
+    digitalWrite(RELAY_PIN, (RELAY_ACTIVE_LEVEL == HIGH) ? LOW : HIGH);
+    relay_hw_on = false;
+}
+
+static void relay_set(bool on) {
+    digitalWrite(RELAY_PIN, on ? RELAY_ACTIVE_LEVEL : ((RELAY_ACTIVE_LEVEL == HIGH) ? LOW : HIGH));
+    relay_hw_on = on;
+    Serial.printf("[relay] GPIO%d -> %s\n", RELAY_PIN, on ? "ON" : "OFF");
+    ui_relay_set_state(on);   // 屏没建时内部判 NULL，安全
+}
+
+extern "C" {
+
+void ui_relay_on_toggle_requested(bool on) {
+    relay_set(on);
+}
+
+bool ui_relay_get_hw_state(void) {
+    return relay_hw_on;
+}
+
+} /* extern "C" */
+
+
 // 系统信息 / 时间 / 串口命令
 void print_system_info() {
     Serial.println("\n========================================");
@@ -1783,9 +1832,23 @@ void process_serial_command(const String& cmd_in) {
     else if (cmd == "chan") {
         wscan_serial_dump();
     }
+    // 继电器：和屏幕上的开关走同一个 relay_set()，
+    // 所以串口改了状态，界面（如果开着）也会同步。
+    else if (cmd == "relay on") {
+        relay_set(true);
+    }
+    else if (cmd == "relay off") {
+        relay_set(false);
+    }
+    else if (cmd == "relay status") {
+        Serial.printf("relay: %s (GPIO%d, active-%s)\n",
+                      relay_hw_on ? "ON" : "OFF", RELAY_PIN,
+                      (RELAY_ACTIVE_LEVEL == HIGH) ? "HIGH" : "LOW");
+    }
     else if (cmd == "help") {
         Serial.println("/dht11 profile start | stop | status");
         Serial.println("/chan scan | /chan");
+        Serial.println("relay on | relay off | relay status");
         Serial.println("fetch | date | reboot");
     }
     else {
@@ -1828,6 +1891,11 @@ void original_setup() {
 
     // 显示初始化（LCD + 触摸 + LVGL + 缓冲 + 驱动注册）全在移植层
     disp_port_init_all();
+
+    // 继电器 GPIO 初始化：必须在 ui_init() 之前 ——
+    // ui_relay 屏（懒创建）建屏时会读 relay_hw_on 同步界面，
+    // 缓存必须先有确定值（false）。
+    relay_hw_init();
 
     // DHT11 上电后需要约 1s 稳定
     dht.begin();

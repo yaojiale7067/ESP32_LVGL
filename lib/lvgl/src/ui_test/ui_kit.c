@@ -516,14 +516,17 @@ lv_obj_t * uik_menu_row_icon(lv_obj_t * parent, int x, int y, int w, int h,
     lv_obj_set_style_pad_all(row, 0, LV_STATE_DEFAULT);
     uik_btn_states(row, bg);
 
-    // 徽章在行内垂直居中：(h - BADGE) / 2
-    uik_badge(row, 5, (h - UIK_BADGE) / 2, UIK_BADGE, symbol, accent);
+    // 徽章在行内垂直居中：(h - BADGE) / 2。
+    // ★ 行高不足时徽章跟着缩（至少上下各留 3px）：菜单从 5 行加到 6 行后
+    //   行高只有 29，27 的徽章会顶满整行。35 高的行仍然是 27，视觉不变。
+    int bsize = (h - 6 < UIK_BADGE) ? (h - 6) : UIK_BADGE;
+    uik_badge(row, 5, (h - bsize) / 2, bsize, symbol, accent);
 
     lv_obj_t * l = lv_label_create(row);
     lv_label_set_text(l, title ? title : "");
     lv_obj_set_style_text_font(l, UIK_FONT_TITLE, LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(l, lv_color_hex(UIK_C_TEXT), LV_STATE_DEFAULT);
-    lv_obj_align(l, LV_ALIGN_LEFT_MID, 5 + UIK_BADGE + 9, 0);
+    lv_obj_align(l, LV_ALIGN_LEFT_MID, 5 + bsize + 9, 0);
 
     lv_obj_t * arrow = lv_label_create(row);
     lv_label_set_text(arrow, LV_SYMBOL_RIGHT);

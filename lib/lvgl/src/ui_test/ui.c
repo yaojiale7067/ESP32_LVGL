@@ -65,4 +65,5 @@ void ui_destroy(void)
     ui_file_screen_destroy();
     ui_wifi_screen_destroy();
     ui_wscan_screen_destroy();   // 懒创建的屏，函数内部已判 NULL，没建过就是空操作
+    ui_relay_screen_destroy();   // 同上
 }
