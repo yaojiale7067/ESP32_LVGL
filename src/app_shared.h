@@ -28,6 +28,47 @@ typedef struct {
     char ssids[APP_SCAN_MAX_AP][APP_SSID_MAX_LEN];
 } ScanResultMsg_t;              // sizeof ≈ 1654B，入队时注意任务栈
 
+// ============================================================================
+//  WiFi 信道扫描（2.4GHz 信道占用分析）
+//  ----------------------------------------------------------------------------
+//  和上面的"网络列表扫描"是两件事，所以走独立的队列、独立的结果结构：
+//    · 列表扫描只关心 SSID（show_hidden=false，找的是能连的名字）；
+//    · 信道扫描关心"哪个信道干净"：隐藏 SSID 的 AP 一样占频谱，必须算进去，
+//      而且要按信道聚合成占用图。
+//  2.4GHz 只有 1..13（ESP32 在 CN 区不用 14），20MHz 带宽实际横跨 5 个信道，
+//  所以"信道 n 有多脏"看的是 n-2..n+2 范围内的 AP 总数（load），不是只看 n。
+// ============================================================================
+#define APP_CSCAN_MAX_AP  32            // 详情表最多保留多少个 AP（按 RSSI 取最强的）
+#define WCH_MIN           1
+#define WCH_MAX           13
+#define WCH_SLOTS         (WCH_MAX + 1) // 按信道号当下标：[0] 不用，[1..13] 有效
+
+typedef struct {
+    char    ssid[APP_SSID_MAX_LEN];     // 33
+    int8_t  rssi;
+    uint8_t channel;
+    uint8_t enc;                        // wifi_auth_mode_t
+} ChanScanAp_t;                         // 36B：全是 char/uint8，没有填充
+
+// 只带一个 request 标志：永远全信道扫。
+// 不做"只扫某一个信道"：那样 ap_per_ch[] 里其余 12 格只能置 0 或沿用旧值，
+// 前者会把占用图画成"只有一个信道有东西"，后者是悄悄过期 —— 两种都比重扫一次更糟。
+// 全扫在 active 300ms/信道下约 4s，和单信道扫（0.3s）的差距换不来正确性。
+typedef struct {
+    bool    request;
+} ChanScanReq_t;
+
+typedef struct {
+    int16_t      scan_ret;              // WiFi.scanNetworks() 原样返回，<0 表示失败
+    uint16_t     count;                 // aps[] 里的有效条数（可能被 MAX_AP 截断）
+    uint8_t      ap_per_ch[WCH_SLOTS];  // 每信道 AP 数（精确值，不受 MAX_AP 截断影响）
+    int8_t       best_rssi[WCH_SLOTS];  // 每信道最强 RSSI，空信道为 -127
+    uint8_t      load[WCH_SLOTS];       // 干扰负载 = ch-2..ch+2 的 AP 数之和
+    uint8_t      best_ch;               // 推荐信道（load 最小，并列偏向 1/6/11）
+    uint8_t      best_1611;             // 1/6/11 三个非重叠信道里最干净的
+    ChanScanAp_t aps[APP_CSCAN_MAX_AP];
+} ChanScanResult_t;                     // sizeof ≈ 1202B
+
 typedef struct {
     char line[96];
 } SerialCmdMsg_t;
@@ -57,6 +98,8 @@ size_t bleuart_send(const char* data, size_t len);
 extern QueueHandle_t wifiConfigQueue;        // UI(core0)  -> WiFi(core1)
 extern QueueHandle_t wifiScanRequestQueue;   // UI(core0)  -> WiFi(core1)
 extern QueueHandle_t wifiScanResultQueue;    // WiFi(core1)-> UI(core0)
+extern QueueHandle_t wifiChanScanReqQueue;   // UI(core0)  -> WiFi(core1)  信道扫描请求
+extern QueueHandle_t wifiChanScanResQueue;   // WiFi(core1)-> UI(core0)  信道扫描结果
 extern QueueHandle_t serialCmdQueue;         // loop(core1)-> UI(core0)
 
 extern WifiConfigMsg_t   g_wifiBootCfg;      // 开机配置（SD 加载或内置兜底）

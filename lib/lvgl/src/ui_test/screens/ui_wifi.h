@@ -11,6 +11,7 @@ extern lv_obj_t * ui_wifi;
 extern lv_obj_t * ui_wifi_list;
 extern lv_obj_t * ui_wifi_password_ta;
 extern lv_obj_t * ui_wifi_scan_btn;
+extern lv_obj_t * ui_wifi_chan_btn;      // 顶栏右侧：进信道占用分析屏（ui_wscan）
 extern lv_obj_t * ui_wifi_connect_btn;
 extern lv_obj_t * ui_wifi_back_btn;
 extern lv_obj_t * ui_wifi_status_label;

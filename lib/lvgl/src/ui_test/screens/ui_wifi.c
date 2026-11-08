@@ -2,14 +2,14 @@
 //  ui_wifi.c - WiFi 设置屏
 //
 //  布局（320x240）：
-//      0..37     顶栏：[← Back]   WiFi Settings   [⟳ Scan]
-//      40..52    小节标题 "NETWORKS"
-//      54..166   网络列表（面板外框 + 内嵌 lv_list，可滚动）
-//      170..200  密码行：[密码框 206x30]  [Connect 98x30]
+//      0..37     顶栏：[← Back]   WiFi Settings   [Channels]
+//      40..64    小节标题行："NETWORKS"  +  [⟳ Scan]
+//      68..174   网络列表（面板外框 + 内嵌 lv_list，正好 4 行整）
+//      178..208  密码行：[密码框 210x30]  [Connect 98x30]
 //      212..239  状态提示（含上沿分隔线）
 //
 //  键盘弹出时（占底部 120px）重排：
-//      54..82    列表压到一行高（选网络时够用）
+//      40..71    列表压到一行整，小节标题行整行隐藏
 //      86..116   密码行紧贴键盘上沿 —— 输入密码时一定看得见
 //  ★ 旧版的密码行固定 y=166，键盘一弹（120..239）就把它和 Connect 一起盖住，
 //    用户根本看不到自己输了几个字符。这是这一屏最实际的可用性问题。
@@ -18,19 +18,22 @@
 //    1) 左右留白统一 ui_kit 的 4（旧版 4 但通栏宽算成 308，右留白 8，与卡片对不齐）。
 //    2) 列表行改成 uik_list/uik_list_row 的紧凑样式（内边距 10→5），
 //       同样高度能多看一倍网络名。
-//    3) 刷新按钮从 uik_topbar 的默认蓝改成"扫"这个动的语义 —— 保持主色，
-//       但补上按下反馈（uik_btn_states）。
+//    3) "扫描"从顶栏挪到列表正上方的小节标题行 —— 它作用的对象就是下面这个列表，
+//       放在列表头上比放在屏幕右上角更符合"就近"直觉。
+//       顶栏右侧腾出来给 [Channels]，进信道占用分析屏（ui_wscan）。
 //    4) 状态行加分隔线，不再是一条悬空的灰字。
 // ============================================================================
 
 #include "ui_wifi.h"
 #include "../ui.h"       // ui_Screen1 / ui_Screen1_screen_init / _ui_screen_change
+#include "ui_wscan.h"    // ui_wscan / ui_wscan_screen_init
 #include "../ui_kit.h"
 
 lv_obj_t * ui_wifi = NULL;
 lv_obj_t * ui_wifi_list = NULL;
 lv_obj_t * ui_wifi_password_ta = NULL;
 lv_obj_t * ui_wifi_scan_btn = NULL;
+lv_obj_t * ui_wifi_chan_btn = NULL;
 lv_obj_t * ui_wifi_connect_btn = NULL;
 lv_obj_t * ui_wifi_back_btn = NULL;
 lv_obj_t * ui_wifi_status_label = NULL;
@@ -40,20 +43,29 @@ static lv_obj_t * wifi_list_cont = NULL;
 static lv_obj_t * wifi_section_label = NULL;
 
 // ---- 几何 ----------------------------------------------------------------
-#define WF_SEC_Y      (UIK_CONTENT_Y + 2)                 // 40：小节标题
-#define WF_LIST_Y     (UIK_CONTENT_Y + 16)                // 54
-#define WF_LIST_H     112                                 // 54..166
-#define WF_ROW_Y      170                                 // 密码行
-#define WF_ROW_H      30
+//  ★ 列表可视高度必须是行高的整数倍，否则最后一行被裁一半，看着像渲染坏了。
+//    uik_list_row() 的行高 = 12pt 行高 15 + 2*pad4 + 1px 底边框 = 25。
+//    uik_panel 的 pad_all 2 + 1px 边框吃掉 6px，所以面板高 = 25*行数 + 6：
+//        4 行 -> 106，1 行 -> 31。
+#define WF_SEC_Y      (UIK_CONTENT_Y + 2)                     // 40：小节标题行
+#define WF_SEC_H      24                                      // 40..64
+#define WF_SECBTN_W   76
+#define WF_LIST_Y     (WF_SEC_Y + WF_SEC_H + UIK_PANEL_GAP)   // 68
+#define WF_LIST_H     (4 * 25 + 6)                            // 106 -> 68..174
+#define WF_ROW_Y      (WF_LIST_Y + WF_LIST_H + UIK_PANEL_GAP) // 178：密码行
+#define WF_ROW_H      30                                      // 178..208
 #define WF_CONN_W     98
 #define WF_TA_W       (UIK_CONTENT_W - UIK_PANEL_GAP - WF_CONN_W)   // 210
-// 键盘弹起时
-#define WF_LIST_H_KB  28                                  // 54..82
-#define WF_ROW_Y_KB   (UIK_KB_TOP - WF_ROW_H - 4)         // 86
+// 键盘弹起时（键盘占 120..239）：标题行整行隐藏，列表压到一行整，密码行贴键盘上沿
+#define WF_LIST_Y_KB  (UIK_CONTENT_Y + 2)                     // 40
+#define WF_LIST_H_KB  (1 * 25 + 6)                            // 31 -> 40..71
+#define WF_ROW_Y_KB   (UIK_KB_TOP - WF_ROW_H - 4)             // 86 -> 86..116
 
 static void wifi_layout_keyboard_up(bool up)
 {
     if (wifi_list_cont) {
+        lv_obj_align(wifi_list_cont, LV_ALIGN_TOP_LEFT, UIK_LEFT,
+                     up ? WF_LIST_Y_KB : WF_LIST_Y);
         lv_obj_set_height(wifi_list_cont, up ? WF_LIST_H_KB : WF_LIST_H);
     }
     if (ui_wifi_password_ta) {
@@ -63,6 +75,15 @@ static void wifi_layout_keyboard_up(bool up)
     if (ui_wifi_connect_btn) {
         lv_obj_align(ui_wifi_connect_btn, LV_ALIGN_TOP_RIGHT, -UIK_PAD,
                      up ? WF_ROW_Y_KB : WF_ROW_Y);
+    }
+    // 键盘一弹，纵向只够"列表 + 密码行"，标题行（NETWORKS + Scan）整行收起来，
+    // 否则压缩后的列表会压到它上面。
+    // 顶栏的 [Channels] 不藏 —— 它在顶栏里，键盘压不到，而且是进信道屏的唯一入口。
+    lv_obj_t * sec_row[2] = { wifi_section_label, ui_wifi_scan_btn };
+    for (int i = 0; i < 2; i++) {
+        if (sec_row[i] == NULL) continue;
+        if (up) lv_obj_add_flag(sec_row[i], LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_clear_flag(sec_row[i], LV_OBJ_FLAG_HIDDEN);
     }
     // 状态条在键盘区域里，弹出时先收起来，否则会被压在键盘下面
     if (ui_wifi_status_label) {
@@ -109,6 +130,16 @@ static void back_btn_ui_cb(lv_event_t * e) {
     }
 }
 
+// 顶栏右侧 [Channels]：进信道占用分析屏。
+// 同样走 _ui_screen_change —— 那个屏不在 ui_init() 里预建（见 ui.c 的注释），
+// 第一次进来时才创建。
+static void chan_btn_ui_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        _ui_screen_change(&ui_wscan, LV_SCR_LOAD_ANIM_NONE, 0, 0,
+                          &ui_wscan_screen_init);
+    }
+}
+
 // 扫描和连接按钮留空，业务逻辑在 LVGL_Demos.cpp 中绑定
 static void scan_btn_ui_cb(lv_event_t * e) { (void)e; }
 static void connect_btn_ui_cb(lv_event_t * e) { (void)e; }
@@ -116,14 +147,32 @@ static void connect_btn_ui_cb(lv_event_t * e) { (void)e; }
 void ui_wifi_screen_init(void) {
     ui_wifi = uik_screen_init();
 
-    // ---------------- 顶栏：左"返回" / 中"标题" / 右"扫描" ----------------
-    uik_topbar(ui_wifi, "WiFi Settings", LV_SYMBOL_REFRESH " Scan",
-               back_btn_ui_cb, scan_btn_ui_cb, &ui_wifi_back_btn, &ui_wifi_scan_btn);
-    if (ui_wifi_scan_btn != NULL) uik_btn_states(ui_wifi_scan_btn, UIK_C_PRIMARY);
+    // ---------------- 顶栏：左"返回" / 中"标题" / 右"信道分析" ----------------
+    // 右上角给 [Channels]（进另一屏 = 导航动作），列表扫描挪到列表头上，
+    // 这样每个按钮都紧挨它作用的对象。
+    uik_topbar(ui_wifi, "WiFi Settings", "Channels",
+               back_btn_ui_cb, chan_btn_ui_cb, &ui_wifi_back_btn, &ui_wifi_chan_btn);
+    if (ui_wifi_chan_btn != NULL) {
+        // [Channels] 是**导航**（和"返回"同类），不是本页的主操作，
+        // 所以从顶栏默认的 PRIMARY 蓝改成 NEUTRAL 灰 —— 主色留给下面的 [⟳ Scan]。
+        // 顶栏两个按钮同为灰色，读起来就是"这一排都是走位用的"。
+        uik_btn_states(ui_wifi_chan_btn, UIK_C_NEUTRAL);
+        // uik_topbar 的右侧按钮是 72 宽 + TITLE(14pt)，"Channels" 八个字符会顶到边。
+        // 降到 BODY(12pt) 约 52px，留出呼吸空间；左侧"← Back"仍用 14pt
+        // （它带图标，信息量不一样，不必强行对齐字号）。
+        lv_obj_t * cl = lv_obj_get_child(ui_wifi_chan_btn, 0);
+        if (cl != NULL) lv_obj_set_style_text_font(cl, UIK_FONT_BODY, LV_STATE_DEFAULT);
+    }
 
-    // ---------------- 小节标题 ----------------
-    wifi_section_label = uik_label(ui_wifi, "NETWORKS", UIK_LEFT, WF_SEC_Y,
+    // ---------------- 小节标题行：NETWORKS  +  [⟳ Scan] ----------------
+    wifi_section_label = uik_label(ui_wifi, "NETWORKS", UIK_LEFT,
+                                   WF_SEC_Y + (WF_SEC_H - 12) / 2,
                                    UIK_C_TEXT_DIM, UIK_FONT_HINT, LV_TEXT_ALIGN_LEFT);
+
+    ui_wifi_scan_btn = uik_btn(ui_wifi, LV_SYMBOL_REFRESH " Scan",
+                               UIK_RIGHT_EDGE - WF_SECBTN_W, WF_SEC_Y,
+                               WF_SECBTN_W, WF_SEC_H, UIK_C_PRIMARY);
+    lv_obj_add_event_cb(ui_wifi_scan_btn, scan_btn_ui_cb, LV_EVENT_CLICKED, NULL);
 
     // ---------------- 网络列表 ----------------
     wifi_list_cont = uik_panel(ui_wifi, UIK_LEFT, WF_LIST_Y, UIK_CONTENT_W, WF_LIST_H);
@@ -178,6 +227,7 @@ void ui_wifi_screen_destroy(void) {
     ui_wifi_list = NULL;
     ui_wifi_password_ta = NULL;
     ui_wifi_scan_btn = NULL;
+    ui_wifi_chan_btn = NULL;
     ui_wifi_connect_btn = NULL;
     ui_wifi_back_btn = NULL;
     ui_wifi_status_label = NULL;

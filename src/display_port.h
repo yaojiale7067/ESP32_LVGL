@@ -1,12 +1,3 @@
-// display_port.h - 显示驱动移植层（LCD + 触摸 + 显示缓冲）
-//
-// 改代码前必读：
-//  1) 显示缓冲【必须】放 PSRAM，不能用内部 RAM。内部 RAM 是 BLE/WiFi 协议栈的
-//     生命线，被占掉后 WiFi 会直接初始化失败（alloc pp wdev funcs fail）。
-//     宁可屏幕有瑕疵，也不能把射频饿死。
-//  2) 缓冲保持整屏（DISP_BUF_DIV = 1）：实测 1/4 屏(60行) 撕裂反而比整屏更严重，
-//     1/10 屏(24行) 撕裂"还行"但界面略卡。根治只能接面板 TE 脚做同步。
-//  3) full_refresh 必须保持 0，打开会让撕裂更严重。
 #ifndef DISPLAY_PORT_H
 #define DISPLAY_PORT_H
 

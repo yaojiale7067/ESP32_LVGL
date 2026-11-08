@@ -25,6 +25,7 @@
 #include "ui_test/ui_kit.h"             // UIK_C_* 颜色规范 / UIK_FONT_* 字号
 #include "ui_test/screens/ui_file.h"
 #include "ui_test/screens/ui_wifi.h"
+#include "ui_test/screens/ui_wscan.h"        // 信道占用分析屏
 #if ENABLE_BLE
 #include "ui_test/screens/ui_ble.h"
 #endif
@@ -79,6 +80,15 @@ static WifiScanState  wifi_scan_state = WSCAN_IDLE;
 static unsigned long  wifi_scan_start = 0;
 static const unsigned long WIFI_SCAN_TIMEOUT_MS = 25000;
 
+// 信道扫描（ui_wscan 屏）的状态机。和上面那个是两套队列、两套状态，
+// 因为两件事的语义不同：网络列表扫"能连的名字"，信道扫"频谱占用"。
+// 共用一个状态位的话，在一屏点扫描会把另一屏也锁住。
+static WifiScanState  wscan_state = WSCAN_IDLE;
+static unsigned long  wscan_start = 0;
+static const unsigned long WSCAN_TIMEOUT_MS = 25000;   // 全信道 active 扫描约 4s，留足余量
+static ChanScanResult_t wscan_last;                    // 最近一次结果，供"点柱子看详情"复用
+static bool             wscan_have_data = false;
+
 // TXT 串口发送分片推进，避免整段阻塞 UI
 static char*  tx_buffer   = nullptr;
 static size_t tx_len      = 0;
@@ -117,6 +127,11 @@ void wifi_save_config_to_sd(const char* ssid, const char* password);
 void wifi_scan_request();
 void wifi_scan_poll();
 void wifi_free_list_user_data();
+void wscan_request();
+void wscan_poll();
+static void wscan_render_bars();
+static void wscan_render_detail(uint8_t ch);
+static void wscan_serial_dump();
 void ui_set_status_ex(const char* text, uint32_t color);   // WiFi 屏状态标签
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap);
 
@@ -245,7 +260,6 @@ static void update_chip_temp_display(void) {
     char buf[24];
     snprintf(buf, sizeof(buf), "%.1f \xC2\xB0" "C", c);
     label_set_text_if_changed(ui_dht11_chip, buf);
-    // 超过 70°C 变红提醒（ESP32-S3 结温上限约 125°C，但 70°C 已偏高）
     label_set_color_if_changed(ui_dht11_chip, c >= 70.0f ? UIK_C_ERR_TEXT : UIK_C_TEXT);
 }
 
@@ -1425,6 +1439,270 @@ void ui_set_status_ex(const char* text, uint32_t color) {
     lv_obj_set_style_text_color(ui_wifi_status_label, lv_color_hex(color), LV_STATE_DEFAULT);
 }
 
+// ============================================================================
+//  WiFi 信道扫描（2.4GHz 信道占用分析，屏体在 ui_test/screens/ui_wscan.c）
+//  ----------------------------------------------------------------------------
+//  和上面的"网络列表扫描"完全独立：独立队列、独立状态机、独立结果缓存。
+//  分工也和其它屏一致 ——
+//      ui_wscan.c      只画：柱子、信道号、详情列表（不认识 WiFi.h / 队列）
+//      LVGL_Demos.cpp  只翻译：队列里的 ChanScanResult_t -> 控件
+//  数据流：点 Scan -> wscan_request() -> wifiChanScanReqQueue -> WiFi_Task(core1)
+//          -> scanNetworks(全信道, show_hidden=true) -> wifiChanScanResQueue
+//          -> wscan_poll()(core0) -> 缓存进 wscan_last -> 刷柱状图
+//  点柱子不再重扫：wscan_last 里已经有全量 AP，直接按信道过滤出详情，
+//          否则每点一根柱子等 4 秒，工具就没法用了。
+// ============================================================================
+
+// wifi_auth_mode_t（esp_wifi_types.h）压成详情行里放得下的短名。
+// 用数字而不是枚举名：这个枚举要经 WiFi.h -> WiFiGeneric.h 才间接可见，
+// 数字映射不受包含顺序影响，值本身是 SDK 头里固定的。
+static const char* wscan_auth_short(uint8_t enc) {
+    switch (enc) {
+        case 0:  return "OPEN";
+        case 1:  return "WEP";
+        case 2:  return "WPA";
+        case 3:  return "WPA2";
+        case 4:  return "WPA/WPA2";
+        case 5:  return "ENT";
+        case 6:  return "WPA3";
+        case 7:  return "WPA2/3";
+        case 8:  return "WAPI";
+        case 9:  return "WPA3-192";
+        default: return "?";
+    }
+}
+
+// 2.4G 总 AP 数 = 各信道计数之和（ap_per_ch 是全量的，不受 MAX_AP 截断影响）
+static int wscan_total_ap() {
+    int t = 0;
+    for (int c = WCH_MIN; c <= WCH_MAX; c++) t += wscan_last.ap_per_ch[c];
+    return t;
+}
+
+// 详情行：SSID 靠左（占满剩余宽度），"RSSI + 加密" 靠右。
+// 不放 WiFi 图标：行内可用宽只有 304，图标(16) + 间隙(6) 会把 SSID 再挤掉 22px，
+// 而 12pt 下一个字符约 6.5px —— 少 22px 就是少三个半字符，不划算。
+// ★ 这些行不带 user_data（数据直接读静态的 wscan_last），所以重建列表时
+//   不需要像 WiFi 网络列表那样先 free 一遍 user_data。
+static void wscan_add_detail_row(const ChanScanAp_t* ap) {
+    if (ui_wscan_detail == NULL) return;
+
+    lv_obj_t* row = lv_list_add_btn(ui_wscan_detail, NULL,
+                                    ap->ssid[0] ? ap->ssid : "<hidden>");
+    // 先把右侧的元信息标签建出来，再统一过 uik_list_row()：
+    // 那个函数会遍历行内所有子对象刷字体/颜色，顺序反了就会漏掉这个标签。
+    // 定宽 + 右对齐 + 更小字号：SSID 那个标签 flex_grow 占掉剩下的 186px，
+    // 元信息永远贴在行尾不会被长 SSID 顶出去。
+    char meta[24];
+    snprintf(meta, sizeof(meta), "%d dBm %s", (int)ap->rssi, wscan_auth_short(ap->enc));
+    lv_obj_t* m = lv_label_create(row);
+    lv_label_set_text(m, meta);
+    lv_obj_set_width(m, 112);
+    lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_RIGHT, LV_STATE_DEFAULT);
+    uik_list_row(row);   // 会把两个标签都设成 BODY，下面再单独把元信息降一档
+    lv_obj_set_style_text_font(m, UIK_FONT_HINT, LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(m, lv_color_hex(UIK_C_TEXT_DIM), LV_STATE_DEFAULT);
+    // 详情行只是"读"的，点了没有动作：去掉 CLICKABLE，
+    // 否则会有按下高亮，暗示它可点（滚动不受影响，拖动落到父 list 上）。
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+}
+
+// 把 wscan_last 里属于信道 ch 的 AP 填进详情列表
+static void wscan_render_detail(uint8_t ch) {
+    if (ui_wscan_detail == NULL) return;
+    if (ch < WCH_MIN || ch > WCH_MAX) return;
+
+    lv_obj_clean(ui_wscan_detail);
+    lv_obj_scroll_to_y(ui_wscan_detail, 0, LV_ANIM_OFF);   // 换信道后要回到顶，否则停在上一屏的位置
+
+    int shown = 0;
+    for (uint16_t i = 0; i < wscan_last.count; i++) {
+        if (wscan_last.aps[i].channel != ch) continue;
+        wscan_add_detail_row(&wscan_last.aps[i]);
+        shown++;
+    }
+
+    int exact = wscan_last.ap_per_ch[ch];
+    char hdr[72];
+    if (exact == 0) {
+        snprintf(hdr, sizeof(hdr), "CH %u " LV_SYMBOL_BULLET " no AP heard", (unsigned)ch);
+    } else {
+        // aps[] 只保留最强的 APP_CSCAN_MAX_AP 个，所以某个信道可能显示不全，
+        // 这时必须说清楚"这是最强的 N 个"，否则总数对不上会被当成 bug。
+        snprintf(hdr, sizeof(hdr),
+                 "CH %u " LV_SYMBOL_BULLET " %d AP " LV_SYMBOL_BULLET " best %d dBm%s",
+                 (unsigned)ch, exact, (int)wscan_last.best_rssi[ch],
+                 (shown < exact) ? " (strongest)" : "");
+    }
+    ui_wscan_set_detail_hdr(hdr);
+
+    if (shown == 0) {
+        // 空信道也要在列表里留一行说明，否则那块区域是纯底色，
+        // 用户分不清"这个信道没 AP"和"还没扫"。
+        lv_obj_t* row = lv_list_add_btn(ui_wscan_detail, NULL,
+                                        (exact == 0) ? "This channel is clean"
+                                                     : "Details not kept (too many APs)");
+        uik_list_row(row);
+        lv_obj_t* lbl = lv_obj_get_child(row, 0);
+        if (lbl != NULL)
+            lv_obj_set_style_text_color(lbl, lv_color_hex(UIK_C_TEXT_FAINT), LV_STATE_DEFAULT);
+    }
+}
+
+// 汇总行 + 柱状图一起刷（数据来自 wscan_last）
+static void wscan_render_bars() {
+    uint8_t per_ch[WSC_CH_NUM];
+    for (int i = 0; i < WSC_CH_NUM; i++) per_ch[i] = wscan_last.ap_per_ch[i + 1];
+    ui_wscan_set_bars(per_ch, wscan_last.best_ch);
+
+    // 推荐信道有两个：best_ch 考虑了邻道干扰（±2 信道之和），
+    // best_1611 只在互不重叠的 1/6/11 里挑。家用路由器只能设 1/6/11，
+    // 所以两个都给出来，让用户按自己的设备能力选。
+    char sum[80];
+    snprintf(sum, sizeof(sum),
+             "%d AP " LV_SYMBOL_BULLET " best CH %u " LV_SYMBOL_BULLET " 1/6/11: CH %u",
+             wscan_total_ap(), (unsigned)wscan_last.best_ch, (unsigned)wscan_last.best_1611);
+    ui_wscan_set_summary(sum);
+}
+
+// 请求一次全信道扫描（不阻塞：只投队列就返回）
+void wscan_request() {
+    if (wscan_state != WSCAN_IDLE) {
+        ui_wscan_set_status("Scan already running...", UIK_C_WARN_TEXT);
+        return;
+    }
+    if (!wifiChanScanReqQueue || !wifiChanScanResQueue) {
+        ui_wscan_set_status("WiFi queues not ready", UIK_C_ERR_TEXT);
+        return;
+    }
+
+    // 排空两个队列，避免把上一次的结果当成这次的（和网络列表扫描同样的做法）。
+    // 用 xQueueReset 而不是 xQueueReceive 循环：ChanScanResult_t 有 1202B，
+    // 循环需要一个同大小的栈缓冲，纯为"丢掉旧值"付这个栈钱不值。
+    xQueueReset(wifiChanScanResQueue);
+    xQueueReset(wifiChanScanReqQueue);
+
+    ChanScanReq_t req = { true };
+    if (xQueueSend(wifiChanScanReqQueue, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ui_wscan_set_status("Scan request failed", UIK_C_ERR_TEXT);
+        return;
+    }
+    wscan_state = WSCAN_WAIT_RESULT;
+    wscan_start = millis();
+    ui_wscan_set_scanning(true);
+    ui_wscan_set_summary("Scanning 13 channels...");
+    ui_wscan_set_status("Surveying 2.4 GHz, about 4 s", UIK_C_WARN_TEXT);
+}
+
+void wscan_poll() {
+    if (wscan_state != WSCAN_WAIT_RESULT) return;
+
+    if (millis() - wscan_start > WSCAN_TIMEOUT_MS) {
+        wscan_state = WSCAN_IDLE;
+        ui_wscan_set_scanning(false);
+        ui_wscan_set_status("Scan timeout", UIK_C_ERR_TEXT);
+        return;
+    }
+
+    // ★ 先收进栈上的临时副本，只有成功才覆盖 wscan_last：
+    //   扫描失败时 WiFi_Task 送回来的是一份全零结果，直接收进 wscan_last
+    //   会把上一次的好数据抹掉 —— 柱子还画着旧值（失败分支提前 return 没重画），
+    //   详情却已经变空，两边对不上。1202B 的栈帧和 wifi_scan_poll() 里那个
+    //   1654B 的 ScanResultMsg_t 同量级，LVGL_Task 栈 16010 够用，
+    //   而且这两个 poll 是从 original_loop() 顺序调用的，帧不会同时存在。
+    ChanScanResult_t rx;
+    if (xQueueReceive(wifiChanScanResQueue, &rx, 0) != pdTRUE) return;   // 还没到
+    wscan_state = WSCAN_IDLE;
+    ui_wscan_set_scanning(false);
+
+    if (rx.scan_ret < 0) {
+        // scanNetworks 返回 WIFI_SCAN_FAILED(-1) / WIFI_SCAN_RUNNING(-2)：
+        // 和"扫到了 0 个网络"是两件事，必须分开说，否则用户会以为周围真没 WiFi。
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Scan failed (%d)", (int)rx.scan_ret);
+        ui_wscan_set_status(msg, UIK_C_ERR_TEXT);
+        return;   // 保留 wscan_last 与画面不动
+    }
+    memcpy(&wscan_last, &rx, sizeof(wscan_last));
+    wscan_have_data = true;
+
+    unsigned long ms = millis() - wscan_start;
+    char msg[72];
+    snprintf(msg, sizeof(msg), "%d AP in %lu.%01lu s " LV_SYMBOL_BULLET " tap a bar",
+             wscan_total_ap(), ms / 1000UL, (ms % 1000UL) / 100UL);
+    ui_wscan_set_status(msg, UIK_C_OK_TEXT);
+
+    wscan_render_bars();
+    // 保持当前选中：重扫之后柱子会重排，但用户看的那个信道不该被悄悄换掉。
+    // 首次扫描（还没选过）才落到推荐信道上。
+    uint8_t sel = ui_wscan_selected_channel();
+    if (sel == 0) sel = wscan_last.best_ch;
+    ui_wscan_select_channel(sel);
+    wscan_render_detail(sel);
+}
+
+// 串口 /chan：把占用图打到串口。没有屏幕也能用，方便对着真机核对聚合逻辑。
+static void wscan_serial_dump() {
+    if (!wscan_have_data) {
+        Serial.println("[wscan] no data yet, send /chan scan first");
+        return;
+    }
+    Serial.println("\n=== 2.4GHz channel occupancy ===");
+    Serial.println(" CH  APs  load(+-2)  best RSSI");
+    for (int c = WCH_MIN; c <= WCH_MAX; c++) {
+        Serial.printf(" %2d  %3u  %9u  %4d%s\n",
+                      c, (unsigned)wscan_last.ap_per_ch[c],
+                      (unsigned)wscan_last.load[c],
+                      (int)wscan_last.best_rssi[c],
+                      (c == wscan_last.best_ch) ? "  <-- recommended" : "");
+    }
+    Serial.printf(" total %d AP, pick CH %u (1/6/11: CH %u)\n",
+                  wscan_total_ap(), (unsigned)wscan_last.best_ch,
+                  (unsigned)wscan_last.best_1611);
+    for (uint16_t i = 0; i < wscan_last.count; i++) {
+        const ChanScanAp_t& a = wscan_last.aps[i];
+        Serial.printf("   ch%-2u %4d dBm %-9s %s\n",
+                      (unsigned)a.channel, (int)a.rssi,
+                      wscan_auth_short(a.enc), a.ssid[0] ? a.ssid : "<hidden>");
+    }
+    Serial.println("================================\n");
+}
+
+// ---- ui_wscan.c 的回调（那边按 C 编译，必须是 C 链接）----------------------
+extern "C" {
+
+void ui_wscan_on_scan_requested(void) {
+    wscan_request();
+}
+
+void ui_wscan_on_channel_selected(uint8_t channel) {
+    ui_wscan_select_channel(channel);
+    if (!wscan_have_data) {
+        ui_wscan_set_detail_hdr("CH ?" LV_SYMBOL_BULLET "no scan yet");
+        ui_wscan_set_status("Tap Scan first", UIK_C_WARN_TEXT);
+        return;
+    }
+    wscan_render_detail(channel);
+    char msg[56];
+    snprintf(msg, sizeof(msg), "CH %u" LV_SYMBOL_BULLET "%u AP" LV_SYMBOL_BULLET "load %u",
+             (unsigned)channel, (unsigned)wscan_last.ap_per_ch[channel],
+             (unsigned)wscan_last.load[channel]);
+    ui_wscan_set_status(msg, (wscan_last.ap_per_ch[channel] == 0) ? UIK_C_OK_TEXT : UIK_C_TEXT);
+}
+
+void ui_wscan_on_screen_ready(void) {
+    if (!wscan_have_data) return;
+    wscan_render_bars();
+    uint8_t sel = ui_wscan_selected_channel();
+    if (sel == 0) sel = wscan_last.best_ch;
+    ui_wscan_select_channel(sel);
+    wscan_render_detail(sel);
+    ui_wscan_set_status("Cached survey" LV_SYMBOL_BULLET "tap Scan to refresh", UIK_C_TEXT_DIM);
+}
+
+} /* extern "C" */
+
+
 // 系统信息 / 时间 / 串口命令
 void print_system_info() {
     Serial.println("\n========================================");
@@ -1494,8 +1772,20 @@ void process_serial_command(const String& cmd_in) {
     else if (cmd == "date") {
         get_ntp_time();
     }
+    // 信道占用工具也能从串口用：
+    //   /chan scan  触发一次全信道扫描（结果同样会刷到屏幕上）
+    //   /chan       把最近一次的占用图打到串口（不重扫，秒回）
+    // 没屏幕 / 屏幕坏了的时候靠这两条核对聚合逻辑。
+    else if (cmd == "chan scan") {
+        wscan_request();
+        Serial.println("[wscan] scan requested, send /chan again for the table");
+    }
+    else if (cmd == "chan") {
+        wscan_serial_dump();
+    }
     else if (cmd == "help") {
         Serial.println("/dht11 profile start | stop | status");
+        Serial.println("/chan scan | /chan");
         Serial.println("fetch | date | reboot");
     }
     else {
@@ -1608,6 +1898,7 @@ void original_loop() {
     }
 
     if (wifi_scan_state != WSCAN_IDLE) wifi_scan_poll();
+    if (wscan_state != WSCAN_IDLE) wscan_poll();
 
 #if ENABLE_BLE
     // BLE 只在这里碰 LVGL：core1 的 BLE 任务只往缓冲里塞数据

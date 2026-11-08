@@ -10,7 +10,7 @@
 
 // User defined information reported by "Read_User_Setup" test & diagnostics example
 #define USER_SETUP_INFO "User_Setup"
-#define ILI9341_DRIVER       // 使用 ILI9341 驱动（根据您的屏幕实际修改）
+#define ILI9341_DRIVER       
 #define TFT_BACKLIGHT_ON HIGH
 #define TFT_BL   21
 #define TFT_MISO 13   // 原 ESP32 为 12，ESP32-S3 可用 13
@@ -39,7 +39,7 @@
 //   注意这和"撕裂"不冲突：整屏推送时间 = 153600*8/60e6 ≈ 20.5ms，
 //   仍小于面板帧周期 28.5ms（DISP_FRAME_DIV=1, RTNA=0x1B），
 //   所以之前定好的防撕裂参数依然成立，不用动 display_port.cpp。
-#define SPI_FREQUENCY   60000000
+#define SPI_FREQUENCY   80000000
 #define SPI_READ_FREQUENCY  60000000
 #define SPI_TOUCH_FREQUENCY  2500000
 

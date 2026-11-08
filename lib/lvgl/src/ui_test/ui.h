@@ -23,6 +23,7 @@ extern "C" {
 #include "screens/ui_dht11.h"
 #include "screens/ui_file.h"
 #include "screens/ui_wifi.h"
+#include "screens/ui_wscan.h"   // 信道占用分析：懒创建，见 ui.c 的说明
 
 ///////////////////// VARIABLES ////////////////////
 

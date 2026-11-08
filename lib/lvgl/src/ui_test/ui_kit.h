@@ -76,21 +76,10 @@ extern "C" {
 #define UIK_ACCENT_TEMP    0xE8924A   // 温湿度：琥珀
 #define UIK_ACCENT_FILE    0x43C6B0   // 文件：青绿
 #define UIK_ACCENT_SERIAL  0x8CC461   // 串口：黄绿
-#define UIK_ACCENT_WIFI    0x3FA9E0   // WiFi：蓝
+#define UIK_ACCENT_WIFI    0x0a3ff0   // WiFi：蓝
 #define UIK_ACCENT_BLE     0x9B7CF5   // 蓝牙：靛紫
 #define UIK_ACCENT_HUM     0x4FC3D9   // 湿度：浅青
 #define UIK_ACCENT_CHIP    0xE07A7A   // 片内温度：暖红
-
-// ---------------- 字号（全工程只用这几档，不要再手写 lv_font_montserrat_XX）-
-//
-//   TITLE  14pt  顶栏标题 / 按钮文字 / 菜单行
-//   BODY   12pt  正文、输入框、状态条、列表
-//   HINT   10pt  次要说明、单位、卡片小标题
-//   ICON   16pt  徽章里的符号（比 TITLE 大一档，符号才撑得满 25px 徽章）
-//   NUM    40pt  仅用于温湿度这类"要大号显示"的数值
-//
-//  NUM 从 28pt 提到 40pt：卡片高 112，40pt 行高 44，加上色条/标题/单位
-//  总共约 90，仍有富余；而温湿度是这一屏唯一要读的信息，理应最大。
 #define UIK_FONT_TITLE   (&lv_font_montserrat_14)
 #define UIK_FONT_BODY    (&lv_font_montserrat_12)
 #define UIK_FONT_HINT    (&lv_font_montserrat_10)

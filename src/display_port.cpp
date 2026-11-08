@@ -34,30 +34,6 @@ static lv_disp_drv_t      s_disp_drv;
 void disp_lv_log_cb(const char* buf) { Serial.printf("%s", buf); }
 #endif
 
-// ===========================================================================
-//  横屏横向撕裂：把面板扫描周期拉长到一次整屏写入装得下
-// ---------------------------------------------------------------------------
-//  为什么会撕裂：面板一直在自己扫描 GRAM，扫描周期由 0xB1(Frame Rate Control)
-//  决定。TFT_eSPI 初始化写的是 DIV=0 / RTNA=0x1B，约 70 Hz，一帧只有 14.2 ms。
-//  而整屏 320*240*2 = 153600 字节，80 MHz 下纯走线 15.4 ms，加上从 PSRAM 取数
-//  和每 32 px 一次的 SPI_USR 等待，实测 20 ms 量级。写入比一帧还长 → 扫描指针
-//  会追上还没写完的行，同一次可见帧里上半屏是新内容、下半屏是旧内容 → 一条缝；
-//  每次重绘落进帧内的相位不同 → 缝的位置游走。
-//
-//  这里把 DIV 从 0 改成 1：帧率 70 Hz → 35 Hz，一帧 14.2 ms → 28.5 ms，
-//  于是「写入 20 ms < 帧 28.5 ms」。写入速率一旦快过扫描速率，写完之后的那一帧
-//  整屏都是新内容，缝只可能出现在恰好被写入穿过的那一帧里，一闪而过，
-//  不再是一条长期挂在屏上、到处游走的亮线。
-//
-//  为什么不做到彻底无缝：那需要把写入和面板帧边界对齐（TE 脚或读 0x45 扫描行）。
-//  读扫描行这条路试过，会把 SPI 总线状态搞坏导致整屏崩掉——TFT_eSPI 的寄存器读
-//  走 Arduino HAL 的 spi.transfer()，而平时全库都是直接写 SPI 寄存器，两套配置
-//  混用会互相破坏。没有确认模块 SDO 接到 GPIO13 之前不要再走读路径。
-//
-//  参数：0xB1 参数1 = DIV[1:0]（0..3，帧周期 ×2^DIV），参数2 = RTNA[4:0]（1..31）。
-//  帧率 ≈ 1896/(RTNA·2^DIV)。DIV 每加 1 帧周期翻倍；不想改变刷新率就把
-//  DISP_FRAME_DIV 改回 0（撕裂会回来）。
-// ===========================================================================
 #ifndef DISP_FRAME_DIV
 #define DISP_FRAME_DIV   1       // 0=70Hz  1=35Hz  2=17.5Hz  3=8.8Hz
 #endif
@@ -132,7 +108,7 @@ static bool disp_alloc_buffers(size_t* out_size)
     s_buf1 = (lv_color_t*)heap_caps_malloc(DISP_MIN_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_DMA);
     s_buf2 = (lv_color_t*)heap_caps_malloc(DISP_MIN_BUF_SIZE * sizeof(lv_color_t), MALLOC_CAP_DMA);
     Serial.printf("[LCD] WARN internal DMA buffer %u px each (free heap %u) —— "
-                  "条带变多，画面会有横向撕裂\n",
+                  "\n",
                   (unsigned)*out_size, (unsigned)ESP.getFreeHeap());
     return (s_buf1 != nullptr);
 }

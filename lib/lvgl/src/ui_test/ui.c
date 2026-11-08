@@ -50,6 +50,9 @@ void ui_init(void)
     ui_dht11_screen_init();
     ui_file_screen_init();
     ui_wifi_screen_init();
+    // ui_wscan（信道分析）和 ui_ble 一样是**懒创建**的：不在这一次性建好，
+    // 而是第一次点 WiFi 屏的 [Channels] 时才由 _ui_screen_change() 兜底创建。
+    // 这样开机不必为"可能永远不会进"的一屏付出 39 个控件的内存和构建时间。
     ui____initial_actions0 = lv_obj_create(NULL);
     lv_disp_load_scr(ui_Screen1);
 }
@@ -61,4 +64,5 @@ void ui_destroy(void)
     ui_dht11_screen_destroy();
     ui_file_screen_destroy();
     ui_wifi_screen_destroy();
+    ui_wscan_screen_destroy();   // 懒创建的屏，函数内部已判 NULL，没建过就是空操作
 }
