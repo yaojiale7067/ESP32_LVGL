@@ -337,6 +337,15 @@ static void ta_focus_ring_cb(lv_event_t * e)
     else                                          lv_obj_clear_state(ta, LV_STATE_USER_1);
 }
 
+// 输入框内容变化 -> 整屏失效（合并脏区成单次全帧 flush，防键盘撕裂）。
+// 挂在 uik_ta() 里，所有软键盘场景共用；推导见调用处注释。
+static void uik_ta_full_refresh_cb(lv_event_t * e)
+{
+    lv_obj_t * ta = lv_event_get_target(e);
+    lv_obj_t * scr = lv_obj_get_screen(ta);
+    if (scr != NULL) lv_obj_invalidate(scr);
+}
+
 void uik_ta_focus_ring(lv_obj_t * ta)
 {
     kit_theme_init();
@@ -353,6 +362,20 @@ lv_obj_t * uik_ta(lv_obj_t * parent, int x, int y, int w, int h,
     lv_obj_t * ta = lv_textarea_create(parent);
     lv_obj_set_size(ta, w, h);
     lv_obj_align(ta, LV_ALIGN_TOP_LEFT, x, y);
+    // ★ 第一件事就关光标闪烁，必须在 set_one_line / set_text 之前：
+    //   lv_textarea_create 末尾已经 start_cursor_blink() 起过一个
+    //   REPEAT_INFINITE 动画，而 anim_time=0 只有在【下一次】
+    //   start_cursor_blink()（set_one_line / 聚焦都会触发）时才会走到
+    //   "删动画、光标常亮"分支（lv_textarea.c:1032-1036）。
+    //   先设属性再动内容，才能保证最终没有动画在跑。
+    //   为什么要关：blink 每 400ms invalidate 一次光标区 → 周期性小块 SPI 写，
+    //   这块 ILI9341 没有 TE 同步，撞上面板扫描线就是一道缝（软键盘场景最明显）。
+    lv_obj_set_style_anim_time(ta, 0, LV_PART_CURSOR);
+    // 构造函数在 create 末尾已经用主题的 anim_time(400ms) 起了 blink 动画，
+    // anim_time=0 只有在下一次 start_cursor_blink() 时才生效。
+    // set_cursor_pos 末尾无条件调 start_cursor_blink（lv_textarea.c:391），
+    // 借它立刻走"删动画、常亮"分支，不留 400ms 的空窗。
+    lv_textarea_set_cursor_pos(ta, 0);
     lv_obj_set_style_bg_color(ta, lv_color_hex(UIK_C_SURFACE), LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(ta, lv_color_hex(UIK_C_TEXT), LV_STATE_DEFAULT);
@@ -383,6 +406,15 @@ lv_obj_t * uik_ta(lv_obj_t * parent, int x, int y, int w, int h,
         lv_obj_set_height(ta, h);
     }
     if (placeholder) lv_textarea_set_placeholder_text(ta, placeholder);
+
+    // ★ 打字时整屏失效：把这次按键产生的脏区（键帽 + 输入行 + 光标）合并成
+    //   单次全帧 flush，而不是让 LVGL 拆成几块小区域分别写。
+    //   理由见 ui_wifi.c 的 password_value_cb 推导 —— 小块 SPI 写撞上无 TE 的
+    //   ILI9341 扫描线会留下【持久】的混帧缝，而整帧写最多一道瞬时缝、
+    //   写完 GRAM 立即一致。这里挂在 uik_ta 上，所以 WiFi/BLE/文件对话框
+    //   的软键盘都自动受益，不必每屏各写一遍。
+    lv_obj_add_event_cb(ta, uik_ta_full_refresh_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
     uik_ta_focus_ring(ta);
     return ta;
 }
@@ -397,6 +429,11 @@ lv_obj_t * uik_ta_readonly(lv_obj_t * parent, int x, int y, int w, int h,
                            const char * placeholder)
 {
     lv_obj_t * ta = uik_ta(parent, x, y, w, h, placeholder, false);
+    // ★ 只读区摘掉"打字全帧刷新"回调：它的内容是业务层程序化 set_text 灌进来的
+    //   （BLE 接收缓冲 / 串口终端），每次灌入都触发 VALUE_CHANGED。
+    //   保留的话 BLE 高频收包时每个包都整屏渲染 + 整帧 SPI 推送，白白吃掉几十毫秒。
+    //   它本来就没有键盘输入场景，不存在按键撕裂问题。
+    lv_obj_remove_event_cb(ta, uik_ta_full_refresh_cb);
     lv_obj_set_style_bg_color(ta, lv_color_hex(UIK_C_SUNKEN), LV_STATE_DEFAULT);
     lv_obj_set_style_text_color(ta, lv_color_hex(UIK_C_OK_TEXT), LV_STATE_DEFAULT);
     lv_obj_set_style_border_color(ta, lv_color_hex(UIK_C_BORDER), LV_STATE_DEFAULT);

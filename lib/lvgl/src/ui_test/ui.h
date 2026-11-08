@@ -25,6 +25,7 @@ extern "C" {
 #include "screens/ui_wifi.h"
 #include "screens/ui_wscan.h"   // 信道占用分析：懒创建，见 ui.c 的说明
 #include "screens/ui_relay.h"   // 继电器控制：懒创建，见 ui.c 的说明
+#include "screens/ui_led.h"     // WS2812 灯带控制：懒创建，见 ui.c 的说明
 
 ///////////////////// VARIABLES ////////////////////
 

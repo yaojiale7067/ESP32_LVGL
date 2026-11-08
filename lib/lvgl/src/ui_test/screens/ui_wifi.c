@@ -97,9 +97,25 @@ static void keyboard_event_cb(lv_event_t * e) {
     if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
         if (keyboard) lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
         wifi_layout_keyboard_up(false);
+        // 整屏失效一次：把"隐藏键盘 + 列表/密码行复位 + 状态条恢复"产生的
+        // 多块脏区合并成单次全帧 flush（见 password_value_cb 的注释）
+        lv_obj_invalidate(ui_wifi);
     }
 }
 
+// ★ 键盘撕裂的修复（用户实测：软键盘弹出/打字时屏幕撕裂）。
+//   根因不在刷新率，而在【局部写的性质】：这块 ILI9341 没有 TE 同步，
+//   GRAM 是边被面板扫描边被 SPI 写入的。
+//     - 小区域写（一个键帽 2KB、输入行 7KB）：撞上扫描线的概率不高，
+//       但一旦撞上，新旧内容就【永久】混在同一帧 GRAM 里，直到下次整帧写才消失
+//       —— 这正是"键盘区域花掉"的观感。
+//     - 整帧写（153KB @ 60MHz ≈ 21ms ≈ 面板帧周期 28.5ms）：撞线只会产生
+//       一道瞬时的缝，写完 GRAM 即一致，下一次扫描必然干净。
+//       这就是 display_port.cpp 里"tear-safe for full-frame push"的含义。
+//   打字路径的全帧合并已经内置在 uik_ta()（VALUE_CHANGED -> 整屏失效），
+//   这里只需覆盖【布局切换】三个时机：键盘弹出 / READY / 失焦收起 ——
+//   一次切换会同时挪列表、密码行、标题行并隐藏状态条，产生四五块脏区，
+//   不合并就是四五次局部 flush、四五次撞线机会。
 static void password_focus_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_FOCUSED) {
@@ -107,6 +123,7 @@ static void password_focus_cb(lv_event_t * e) {
             lv_keyboard_set_textarea(keyboard, ui_wifi_password_ta);
             wifi_layout_keyboard_up(true);
             lv_obj_clear_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_invalidate(ui_wifi);   // 弹出瞬间同样合并成单次全帧写
         }
     }
 }
@@ -115,8 +132,11 @@ static void password_focus_cb(lv_event_t * e) {
 static void password_defocus_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_DEFOCUSED) {
-        if (keyboard) lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
-        wifi_layout_keyboard_up(false);
+        if (keyboard) {
+            lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
+            wifi_layout_keyboard_up(false);
+            lv_obj_invalidate(ui_wifi);
+        }
     }
 }
 
@@ -200,6 +220,7 @@ void ui_wifi_screen_init(void) {
     lv_textarea_set_password_show_time(ui_wifi_password_ta, 0);
     lv_obj_add_event_cb(ui_wifi_password_ta, password_focus_cb, LV_EVENT_FOCUSED, NULL);
     lv_obj_add_event_cb(ui_wifi_password_ta, password_defocus_cb, LV_EVENT_DEFOCUSED, NULL);
+    // 打字时的全帧合并由 uik_ta() 统一挂（见 ui_kit.c 的 uik_ta_full_refresh_cb）
 
     ui_wifi_connect_btn = uik_btn(ui_wifi, "Connect",
                                   UIK_W - UIK_PAD - WF_CONN_W, WF_ROW_Y,

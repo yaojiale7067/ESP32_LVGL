@@ -18,6 +18,8 @@
 #include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <driver/rmt.h>
+#include <driver/periph_ctrl.h>
 
 #include "display_port.h"
 #include "app_shared.h"
@@ -27,6 +29,7 @@
 #include "ui_test/screens/ui_wifi.h"
 #include "ui_test/screens/ui_wscan.h"        // 信道占用分析屏
 #include "ui_test/screens/ui_relay.h"        // 继电器（GPIO41）控制屏
+#include "ui_test/screens/ui_led.h"          // WS2812 灯带（GPIO39）控制屏
 #if ENABLE_BLE
 #include "ui_test/screens/ui_ble.h"
 #endif
@@ -1752,6 +1755,200 @@ bool ui_relay_get_hw_state(void) {
 } /* extern "C" */
 
 
+// ============================================================================
+//  WS2812 灯带控制（GPIO39，屏体在 ui_test/screens/ui_led.c）
+//  ----------------------------------------------------------------------------
+//  驱动：ESP-IDF 的 legacy RMT（S3 上 TX 通道 0..3），不引第三方库。
+//  80MHz/clk_div2 = 25ns/tick：T0H 400ns/T0L 850ns/T1H 800ns/T1L 450ns，
+//  即 WS2812B 的 1.25us 位周期。translator 模式由 RMT 中断分批把
+//  像素字节翻成波形，120 灯整帧也就 3.6ms，在 LVGL 任务里同步等完没有压力。
+//
+//  动画模型：
+//    speed = 0     静止纯色（hue 决定颜色，只在参数变化时写一帧）
+//    speed > 0     彩虹流动：led i 的色相 = hue + phase + i*360/count，
+//                  phase 每 tick(33ms) 前进 speed*0.12°，满速约 1 圈/秒。
+//    brightness    直接当 HSV 的 V 用（0=灭）。
+//  渲染在 30fps 的 lv_timer 里做；静止且参数没变时跳过 RMT 写
+//  （WS2812 自己锁存颜色，不需要持续刷新）。
+//
+//  ★ 上电默认：count=1（先点亮一颗，确认接线/供电再往上加）、
+//    brightness=190（约 75%，满亮度对供电要求高）、hue=200（蓝）。
+// ============================================================================
+#define WS2812_PIN        39
+#define WS2812_RMT_CH     RMT_CHANNEL_1      // 通道 0 留空，避免和潜在外设撞车
+#define WS2812_MAX_LEDS   UI_LED_COUNT_MAX   // 120
+#define WS2812_CLK_DIV    2                  // 80MHz/2 -> 25ns/tick
+#define WS2812_T0H_TICKS  (400 / 25)         // 16
+#define WS2812_T0L_TICKS  (850 / 25)         // 34
+#define WS2812_T1H_TICKS  (800 / 25)         // 32
+#define WS2812_T1L_TICKS  (450 / 25)         // 18
+
+static uint8_t ws_buf[WS2812_MAX_LEDS * 3];  // GRB 字节序，360B
+
+struct LedState {
+    int16_t hue;        // 0..359
+    uint8_t bright;     // 0..255
+    uint8_t speed;      // 0..100，0=静止
+    uint8_t count;      // 1..120
+    float   phase;      // 彩虹相位（度）
+    bool    dirty;      // 下个 tick 需要写灯
+    bool    rmt_ok;
+};
+static LedState led = { 200, 190, 40, 1, 0.0f, true, false };
+
+// 样本字节 -> RMT 波形。RMT 中断里调用，必须 IRAM_ATTR。
+static void IRAM_ATTR ws2812_rmt_adapter(const void* src, rmt_item32_t* dest,
+                                         size_t src_size, size_t wanted_num,
+                                         size_t* translated_size, size_t* item_num)
+{
+    if (src == NULL || dest == NULL) { *translated_size = 0; *item_num = 0; return; }
+    const rmt_item32_t bit0 = {{{ WS2812_T0H_TICKS, 1, WS2812_T0L_TICKS, 0 }}};
+    const rmt_item32_t bit1 = {{{ WS2812_T1H_TICKS, 1, WS2812_T1L_TICKS, 0 }}};
+    size_t size = 0, num = 0;
+    const uint8_t* psrc = (const uint8_t*)src;
+    rmt_item32_t* pdest = dest;
+    while (size < src_size && num < wanted_num) {
+        uint8_t b = *psrc++;
+        for (int i = 7; i >= 0; i--) {          // WS2812 每字节高位先行
+            *pdest++ = (b & (1u << i)) ? bit1 : bit0;
+            num++;
+        }
+        size++;
+    }
+    *translated_size = size;
+    *item_num = num;
+}
+
+static void ws2812_hw_init() {
+    periph_module_enable(PERIPH_RMT_MODULE);
+    // 不用 RMT_DEFAULT_CONFIG_TX：那个宏是指定初始化器写法，
+    // 本文件按 C++（gnu++11）编译，非 C++20 语境下属于 GNU 扩展，
+    // 顺序稍有不匹配就编不过。逐字段赋值最稳。
+    rmt_config_t cfg = {};
+    cfg.rmt_mode = RMT_MODE_TX;
+    cfg.channel = WS2812_RMT_CH;
+    cfg.gpio_num = (gpio_num_t)WS2812_PIN;
+    cfg.clk_div = WS2812_CLK_DIV;
+    cfg.mem_block_num = 2;
+    cfg.flags = 0;
+    cfg.tx_config.loop_en = false;
+    cfg.tx_config.carrier_en = false;
+    cfg.tx_config.idle_level = RMT_IDLE_LEVEL_LOW;
+    cfg.tx_config.idle_output_en = true;
+    if (rmt_config(&cfg) != ESP_OK ||
+        rmt_driver_install(cfg.channel, 0, 0) != ESP_OK) {
+        led.rmt_ok = false;
+        Serial.println("[led] RMT init FAILED, strip disabled");
+        return;
+    }
+    rmt_translator_init(cfg.channel, ws2812_rmt_adapter);
+    led.rmt_ok = true;
+    Serial.printf("[led] WS2812 on GPIO%d, RMT ch%d, max %d LEDs\n",
+                  WS2812_PIN, (int)WS2812_RMT_CH, WS2812_MAX_LEDS);
+}
+
+// HSV -> RGB，饱和度固定 255（见 ui_led.c 头注释：灰调用亮度压）
+static void led_hsv2rgb(int h, uint8_t v, uint8_t* r, uint8_t* g, uint8_t* b) {
+    h = ((h % 360) + 360) % 360;
+    uint8_t region = (uint8_t)(h / 60);
+    uint8_t rem = (uint8_t)((h % 60) * 255 / 60);
+    uint8_t q = (uint8_t)(((uint16_t)v * (255 - rem)) / 255);
+    uint8_t t = (uint8_t)(((uint16_t)v * rem) / 255);
+    switch (region) {
+        case 0:  *r = v; *g = t; *b = 0; break;
+        case 1:  *r = q; *g = v; *b = 0; break;
+        case 2:  *r = 0; *g = v; *b = t; break;
+        case 3:  *r = 0; *g = q; *b = v; break;
+        case 4:  *r = t; *g = 0; *b = v; break;
+        default: *r = v; *g = 0; *b = q; break;
+    }
+}
+
+static uint32_t led_current_rgb() {
+    uint8_t r, g, b;
+    led_hsv2rgb(led.hue, led.bright, &r, &g, &b);
+    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+}
+
+static void ws2812_push_frame() {
+    if (!led.rmt_ok) return;
+    // 一整条铺开一个完整彩虹；count=1 时 spacing=360，退化成"色相轮转的呼吸灯"
+    float spacing = (led.count > 1) ? (360.0f / led.count) : 360.0f;
+    for (int i = 0; i < led.count; i++) {
+        int h = (led.speed == 0)
+                    ? led.hue                                  // 静止纯色
+                    : (int)(led.hue + led.phase + i * spacing); // 彩虹流动
+        uint8_t r, g, b;
+        led_hsv2rgb(h, led.bright, &r, &g, &b);
+        ws_buf[i * 3 + 0] = g;    // WS2812 字节序：GRB
+        ws_buf[i * 3 + 1] = r;
+        ws_buf[i * 3 + 2] = b;
+    }
+    // wait=true：阻塞到发送完（最长 120*24*1.25us = 3.6ms），
+    // ws_buf 是静态的，translator 在 TX_END 中断里分批取用也安全。
+    rmt_write_sample(WS2812_RMT_CH, ws_buf, (size_t)led.count * 3, true);
+}
+
+// 30fps 动画 tick：彩虹模式推进相位；只有 dirty 才真正写灯
+static void led_anim_timer_cb(lv_timer_t*) {
+    if (led.speed > 0) {
+        led.phase += led.speed * 0.12f;      // 满速 360°/s
+        if (led.phase >= 360.0f) led.phase -= 360.0f;
+        led.dirty = true;
+    }
+    if (!led.dirty) return;
+    led.dirty = false;
+    ws2812_push_frame();
+}
+
+// 把当前状态推到界面 + 状态条
+static void led_sync_ui() {
+    ui_led_set_state(led.hue, led.bright, led.speed, led.count, led_current_rgb());
+    char st[72];
+    snprintf(st, sizeof(st), "GPIO%d " LV_SYMBOL_BULLET " %u LED%s " LV_SYMBOL_BULLET " %s",
+             WS2812_PIN, (unsigned)led.count, (led.count > 1) ? "s" : "",
+             led.rmt_ok ? (led.speed ? "rainbow" : "static") : "RMT error");
+    ui_led_set_status(st, led.rmt_ok ? UIK_C_TEXT_DIM : UIK_C_ERR_TEXT);
+}
+
+// 参数入口：夹紧范围 -> 置 dirty -> 同步界面。滑块和串口命令都走这里。
+static void led_apply(int what, int v) {
+    switch (what) {
+        case UI_LED_HUE:
+            led.hue = (int16_t)(v < 0 ? 0 : (v > UI_LED_HUE_MAX ? UI_LED_HUE_MAX : v));
+            break;
+        case UI_LED_BRIGHT:
+            led.bright = (uint8_t)(v < 0 ? 0 : (v > UI_LED_BRIGHT_MAX ? UI_LED_BRIGHT_MAX : v));
+            break;
+        case UI_LED_SPEED:
+            led.speed = (uint8_t)(v < 0 ? 0 : (v > UI_LED_SPEED_MAX ? UI_LED_SPEED_MAX : v));
+            break;
+        case UI_LED_COUNT:
+            led.count = (uint8_t)(v < UI_LED_COUNT_MIN ? UI_LED_COUNT_MIN
+                                                       : (v > UI_LED_COUNT_MAX ? UI_LED_COUNT_MAX : v));
+            break;
+        default:
+            return;
+    }
+    led.dirty = true;
+    led_sync_ui();
+    Serial.printf("[led] hue=%d bright=%u speed=%u count=%u\n",
+                  (int)led.hue, (unsigned)led.bright, (unsigned)led.speed, (unsigned)led.count);
+}
+
+extern "C" {
+
+void ui_led_on_change(int32_t what, int32_t value) {
+    led_apply((int)what, (int)value);
+}
+
+void ui_led_on_screen_ready(void) {
+    led_sync_ui();
+}
+
+} /* extern "C" */
+
+
 // 系统信息 / 时间 / 串口命令
 void print_system_info() {
     Serial.println("\n========================================");
@@ -1845,10 +2042,28 @@ void process_serial_command(const String& cmd_in) {
                       relay_hw_on ? "ON" : "OFF", RELAY_PIN,
                       (RELAY_ACTIVE_LEVEL == HIGH) ? "HIGH" : "LOW");
     }
+    // 灯带：和界面滑块共用 led_apply()，串口改了值，界面（如果开着）同步刷新。
+    // ★ "led status" 必须先判：它也满足 startsWith("led ")，
+    //   放进通用分支会被 sscanf 全落空，只剩一句 usage。
+    else if (cmd == "led status") {
+        Serial.printf("led: GPIO%d hue=%d bright=%u speed=%u count=%u rmt=%s\n",
+                      WS2812_PIN, (int)led.hue, (unsigned)led.bright,
+                      (unsigned)led.speed, (unsigned)led.count,
+                      led.rmt_ok ? "ok" : "FAILED");
+    }
+    else if (cmd.startsWith("led ")) {
+        int v = 0;
+        if      (sscanf(cmd.c_str(), "led hue %d", &v) == 1)    led_apply(UI_LED_HUE, v);
+        else if (sscanf(cmd.c_str(), "led bright %d", &v) == 1) led_apply(UI_LED_BRIGHT, v);
+        else if (sscanf(cmd.c_str(), "led speed %d", &v) == 1)  led_apply(UI_LED_SPEED, v);
+        else if (sscanf(cmd.c_str(), "led count %d", &v) == 1)  led_apply(UI_LED_COUNT, v);
+        else Serial.println("usage: led hue|bright|speed|count <n> | led status");
+    }
     else if (cmd == "help") {
         Serial.println("/dht11 profile start | stop | status");
         Serial.println("/chan scan | /chan");
         Serial.println("relay on | relay off | relay status");
+        Serial.println("led hue|bright|speed|count <n> | led status");
         Serial.println("fetch | date | reboot");
     }
     else {
@@ -1896,6 +2111,12 @@ void original_setup() {
     // ui_relay 屏（懒创建）建屏时会读 relay_hw_on 同步界面，
     // 缓存必须先有确定值（false）。
     relay_hw_init();
+
+    // WS2812：RMT 初始化 + 上电先推一帧默认色（1 颗、75%、蓝）。
+    // 必须在 ui_init() 之前：ui_led 屏建屏时 led_sync_ui() 读这份状态。
+    ws2812_hw_init();
+    ws2812_push_frame();
+    led.dirty = false;
 
     // DHT11 上电后需要约 1s 稳定
     dht.begin();
@@ -1945,6 +2166,10 @@ void original_setup() {
     // 2000ms 足够，只用来刷新温湿度
     lv_timer_create(dht_timer_cb, 2000, NULL);
 #endif
+
+    // WS2812 动画 tick：30fps。静止且参数没变时回调里直接 return，
+    // 不产生 RMT 写，也不碰 LVGL 控件 —— 不会给刷新循环添堵。
+    lv_timer_create(led_anim_timer_cb, 33, NULL);
 
     if (ui_file != NULL) {
         if (ui_refresh_btn != NULL) {

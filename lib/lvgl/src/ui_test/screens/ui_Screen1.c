@@ -1,29 +1,32 @@
 // ============================================================================
-//  ui_Screen1.c - 主菜单
+//  ui_Screen1.c - 主菜单（可滚动列表）
 //
 //  视觉结构（320x240）：
 //      0..39    标题条：左边 "ESP32-S3" 20pt，右边 "LVGL 8.3.6" 10pt 弱化
 //      40       1px 分隔线
-//      44..238  6 行菜单，每行 29 高、间隔 4：
-//                  [徽章]  Temp / RH                              ›
-//      238..240 底部留白
+//      44..236  ★ 可滚动菜单容器：行高 35、行距 4，右侧 6px 滚动条槽。
+//               菜单条目已超过一屏（7 行 = 269px > 192px），拖动滚动，
+//               滚动条只在滚动时出现（AUTO）。第 5 行被下沿裁掉一截，
+//               这本身就是"还能往下滚"的视觉提示。
+//      236..240 底部留白
 //
-//  相比旧版：
-//    1) 每行左侧加了一个 25px 的图标徽章，按功能上色（琥珀/青绿/黄绿/蓝/靛紫）。
-//       以前五行都是同一个灰底 + 同一档灰白图标，扫过去分不出谁是谁。
-//    2) 标题条从"两行居中文字"改成"左对齐大标题 + 右侧版本号"：
-//       菜单本身才是这屏的主体，标题没必要占两行居中。
-//    3) 去掉了压在屏幕左下角的版本号 —— 它和第五行只差 7px，视觉上像是
-//       菜单的一部分。版本号移到标题条右侧，作为背景信息存在。
-//    4) 按下态改成提亮（见 uik_btn_states），点击有明确反馈。
+//  为什么从"固定 6 行"改成滚动列表：
+//    1) 加到第 7 行（LED Strip）后 240px 已经放不下 —— 继续压行高就要
+//       牺牲触摸目标（29px 已经贴近下限，再压就难点了）。
+//    2) 滚动列表对"菜单会继续长"是开放的：以后加第 8、9 项不用动布局，
+//       固定行高方案每加一行都要全菜单重算。
+//    3) 行高恢复标准 UIK_ROW_H(35)，徽章恢复 27，和其它屏的节奏一致。
 //
 //  对外符号保持不变（ui_Screen1 / ui_Button2/3/5/8 / ui_Label2/5/7/11/12），
 //  这样 ui_events.h 里由 SquareLine 生成的 event 函数仍能正常链接。
+//  注意：菜单行现在是滚动容器的子对象，不再是屏幕直挂 —— 通过句柄访问的代码
+//  不受影响，但 lv_obj_get_parent(ui_Button3) 拿到的是容器而不是屏幕。
 // ============================================================================
 
 #include "../ui.h"
 #include "../ui_kit.h"
 #include "ui_relay.h"    // ui_relay / ui_relay_screen_init
+#include "ui_led.h"      // ui_led / ui_led_screen_init
 #if ENABLE_BLE
 #include "ui_ble.h"      // ui_ble / ble_set_prev_screen
 #endif
@@ -44,6 +47,9 @@ static lv_obj_t * ui_ButtonBle = NULL;    // BLE
 static lv_obj_t * ui_LabelBle = NULL;
 static lv_obj_t * ui_ButtonRelay = NULL;  // Relay（GPIO41 设备开关）
 static lv_obj_t * ui_LabelRelay = NULL;
+static lv_obj_t * ui_ButtonLed = NULL;    // LED Strip（WS2812 / GPIO39）
+static lv_obj_t * ui_LabelLed = NULL;
+static lv_obj_t * menu_cont = NULL;       // 可滚动菜单容器
 
 // ---- 菜单行的点击处理（统一用无动画切换，视觉上更干净）--------------------
 static void go_serial_cb(lv_event_t * e)
@@ -66,11 +72,16 @@ static void go_wifi_cb(lv_event_t * e)
     (void)e;
     _ui_screen_change(&ui_wifi, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_wifi_screen_init);
 }
-// Relay 屏和 wscan 一样是懒创建的：第一次点这行时才建。
+// Relay / wscan / LED 屏都是懒创建的：第一次点这行时才建。
 static void go_relay_cb(lv_event_t * e)
 {
     (void)e;
     _ui_screen_change(&ui_relay, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_relay_screen_init);
+}
+static void go_led_cb(lv_event_t * e)
+{
+    (void)e;
+    _ui_screen_change(&ui_led, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_led_screen_init);
 }
 
 // 注意：本文件按 C 编译，**不能用 lambda**，回调必须是普通静态函数
@@ -86,25 +97,19 @@ static void go_ble_cb(lv_event_t * e)
 #endif
 
 // ---- 菜单几何 --------------------------------------------------------------
-// 标题条 40 + 分隔线 1 + 一个缝隙 3 = 44 起。
-// ★ 6 行菜单（加了 Relay）：行高压到 29、缝隙仍是 4 → 步距 33，
-//   44 + 5*33 + 29 = 238，距屏幕底还有 2px。
-//   29 高的行放 14pt 标题（行高 16）绰绰有余；徽章由 uik_menu_row_icon
-//   自动缩到 23（h-6），不会再顶满整行。
-//   注意：UIK_ROW_H(35) 是"标准行高"，别的屏还在用，这里不动它，
-//   主菜单用自己的 MENU_ROW_H。
+// 标题条 40 + 分隔线 1 + 一个缝隙 3 = 44 起；容器高 183，到 227 为止。
+// 行高恢复标准 UIK_ROW_H(35)，行距 4：7 行内容高 = 7*35 + 6*4 = 269 > 183，滚动。
+// ★ 183 不是随手取的：183 = 4*39 + 27，第 5 行（Bluetooth）刚好被下沿裁掉
+//   8px —— "被切了一半的行"就是最直白的"下面还有，可以滚"提示。
+//   若容器高取 192，前 5 行会【完整】放下（4*39+35=191≤192），屏幕上没有任何
+//   滚动线索，用户根本不知道还有第 6、7 行（Relay / LED Strip 就被藏没了）。
 #define MENU_X      UIK_PANEL_GAP                    // 4（= 左右边距）
-#define MENU_W      (UIK_W - 2 * MENU_X)             // 312
 #define TITLEBAR_H  40                               // 标题条高度
-#define MENU_Y0     (TITLEBAR_H + UIK_PANEL_GAP)     // 44：标题条 + 分隔线 + 缝隙
-#define MENU_ROW_H  29                               // 6 行版行高
-#define MENU_STEP   (MENU_ROW_H + UIK_PANEL_GAP)     // 33
-// Relay 的槽位：BLE 开着就是第 6 槽（下标 5），关了自动补到第 5 槽（下标 4）
-#if ENABLE_BLE
-#define RELAY_SLOT  5
-#else
-#define RELAY_SLOT  4
-#endif
+#define MENU_Y0     (TITLEBAR_H + UIK_PANEL_GAP)     // 44
+#define MENU_H      183                              // 容器可视高：4 行整 + 第 5 行裁 8px
+#define MENU_W      (UIK_W - 2 * MENU_X)             // 312：容器宽
+// 行宽 = 容器内容宽：容器 pad_right 6 留给滚动条槽，行不压在滚动条下面
+#define MENU_ROW_W  (MENU_W - 6)                     // 306
 
 void ui_Screen1_screen_init(void)
 {
@@ -141,47 +146,71 @@ void ui_Screen1_screen_init(void)
     // 标题条下的分隔线
     uik_separator(ui_Screen1, 0, TITLEBAR_H, UIK_W);
 
-    // ---- 6 行菜单 ----
-    // 每行：左侧功能身份色的图标徽章 + 标题 + 右侧箭头（由 uik_menu_row_icon 画）
-    ui_Button3 = uik_menu_row_icon(ui_Screen1, MENU_X, MENU_Y0, MENU_W, MENU_ROW_H,
+    // ---- 可滚动菜单容器 ----
+    // 底色和屏幕一致（BG）：容器只是"滚动视口"，不该看起来像又一层卡片。
+    // pad_right 6 是滚动条槽：行宽 = 容器内容宽，永远不压在滚动条下面。
+    menu_cont = lv_obj_create(ui_Screen1);
+    lv_obj_remove_style_all(menu_cont);
+    lv_obj_set_size(menu_cont, MENU_W, MENU_H);
+    lv_obj_align(menu_cont, LV_ALIGN_TOP_LEFT, MENU_X, MENU_Y0);
+    lv_obj_set_style_bg_color(menu_cont, lv_color_hex(UIK_C_BG), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(menu_cont, LV_OPA_COVER, LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_row(menu_cont, UIK_PANEL_GAP, LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_right(menu_cont, 6, LV_STATE_DEFAULT);
+    lv_obj_set_flex_flow(menu_cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(menu_cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(menu_cont, LV_SCROLLBAR_MODE_AUTO);
+    // 滚动条：4px 宽、抬起色、圆角，只在滚动时出现（AUTO）
+    lv_obj_set_style_width(menu_cont, 4, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(menu_cont, lv_color_hex(UIK_C_NEUTRAL_HI), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(menu_cont, LV_OPA_COVER, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(menu_cont, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_right(menu_cont, 1, LV_PART_SCROLLBAR);
+
+    // ---- 菜单行（flex 列，行顺序即视觉顺序）----
+    // 每行：左侧功能身份色的图标徽章 + 标题 + 右侧箭头（由 uik_menu_row_icon 画）。
+    // flex 父容器会接管行的位置，uik_menu_row_icon 里的 x/y/align 参数被忽略，
+    // 传 0 即可；行高恢复标准 UIK_ROW_H(35)。
+    ui_Button3 = uik_menu_row_icon(menu_cont, 0, 0, MENU_ROW_W, UIK_ROW_H,
                                    LV_SYMBOL_TINT, "Temp / RH",
                                    UIK_ACCENT_TEMP, UIK_C_SURFACE,
                                    go_dht11_cb, NULL, &ui_Label2);
 
-    ui_Button2 = uik_menu_row_icon(ui_Screen1, MENU_X, MENU_Y0 + MENU_STEP, MENU_W, MENU_ROW_H,
+    ui_Button2 = uik_menu_row_icon(menu_cont, 0, 0, MENU_ROW_W, UIK_ROW_H,
                                    LV_SYMBOL_DIRECTORY, "File Manager",
                                    UIK_ACCENT_FILE, UIK_C_SURFACE,
                                    go_file_cb, NULL, &ui_Label5);
 
-    ui_Button5 = uik_menu_row_icon(ui_Screen1, MENU_X, MENU_Y0 + 2 * MENU_STEP, MENU_W, MENU_ROW_H,
+    ui_Button5 = uik_menu_row_icon(menu_cont, 0, 0, MENU_ROW_W, UIK_ROW_H,
                                    LV_SYMBOL_KEYBOARD, "Serial Tool",
                                    UIK_ACCENT_SERIAL, UIK_C_SURFACE,
                                    go_serial_cb, NULL, &ui_Label7);
 
-    ui_Button8 = uik_menu_row_icon(ui_Screen1, MENU_X, MENU_Y0 + 3 * MENU_STEP, MENU_W, MENU_ROW_H,
+    ui_Button8 = uik_menu_row_icon(menu_cont, 0, 0, MENU_ROW_W, UIK_ROW_H,
                                    LV_SYMBOL_WIFI, "WiFi",
                                    UIK_ACCENT_WIFI, UIK_C_SURFACE,
                                    go_wifi_cb, NULL, &ui_Label12);
 
-    // 5) Bluetooth —— 和上面 4 行同底色（UIK_C_SURFACE）。
-    //    原来这里写的是 UIK_C_PRIMARY（主色蓝），于是主菜单上唯一一个蓝按钮
-    //    显得像"被选中/已激活"，其实它和其它行一样只是一级入口。
-    //    主色只用在真正的主操作上（例如各屏的 Send 按钮）。
+    // Bluetooth —— 和其它行同底色（UIK_C_SURFACE）。主色只用在真正的主操作上。
 #if ENABLE_BLE
-    ui_ButtonBle = uik_menu_row_icon(ui_Screen1, MENU_X, MENU_Y0 + 4 * MENU_STEP, MENU_W, MENU_ROW_H,
+    ui_ButtonBle = uik_menu_row_icon(menu_cont, 0, 0, MENU_ROW_W, UIK_ROW_H,
                                      LV_SYMBOL_BLUETOOTH, "Bluetooth",
                                      UIK_ACCENT_BLE, UIK_C_SURFACE,
                                      go_ble_cb, NULL, &ui_LabelBle);
 #endif
 
-    // 6) Relay —— 徽章用电源符号（0xF011，字形表里有），身份色是芯片暖红：
-    //    它控制的是实体设备，色相上和"只读数据"的几行区分开。
-    //    槽位跟着 BLE 开关联动：BLE 关掉时 Relay 自动补到第 5 槽，
-    //    菜单中间不会留一条空带。
-    ui_ButtonRelay = uik_menu_row_icon(ui_Screen1, MENU_X, MENU_Y0 + RELAY_SLOT * MENU_STEP, MENU_W, MENU_ROW_H,
+    // Relay —— 徽章用电源符号（0xF011），身份色芯片暖红：它控制实体设备。
+    ui_ButtonRelay = uik_menu_row_icon(menu_cont, 0, 0, MENU_ROW_W, UIK_ROW_H,
                                        LV_SYMBOL_POWER, "Relay / Device",
                                        UIK_ACCENT_CHIP, UIK_C_SURFACE,
                                        go_relay_cb, NULL, &ui_LabelRelay);
+
+    // LED Strip —— 闪电符号（0xF0E7），身份色用浅青（HUM）：
+    // 菜单里还没有这一相，和暖红(Relay)/靛紫(BLE)都拉得开。
+    ui_ButtonLed = uik_menu_row_icon(menu_cont, 0, 0, MENU_ROW_W, UIK_ROW_H,
+                                     LV_SYMBOL_CHARGE, "LED Strip",
+                                     UIK_ACCENT_HUM, UIK_C_SURFACE,
+                                     go_led_cb, NULL, &ui_LabelLed);
 
     uic_Screen1 = ui_Screen1;
 }
@@ -205,4 +234,7 @@ void ui_Screen1_screen_destroy(void)
     ui_LabelBle = NULL;
     ui_ButtonRelay = NULL;
     ui_LabelRelay = NULL;
+    ui_ButtonLed = NULL;
+    ui_LabelLed = NULL;
+    menu_cont = NULL;
 }
