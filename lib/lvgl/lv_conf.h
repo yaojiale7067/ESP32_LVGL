@@ -54,8 +54,15 @@
     #define LV_MEM_ADR 0     /*0: unused*/
     /*Instead of an address give a memory allocator that will be called to get a memory pool for LVGL. E.g. my_malloc*/
     #if LV_MEM_ADR == 0
-        #undef LV_MEM_POOL_INCLUDE
-        #undef LV_MEM_POOL_ALLOC
+        /* ★ 池子放 PSRAM，不放内部 RAM。
+         * 默认实现是 128KB 的静态数组（.bss，内部 RAM）—— 实测 WiFi+BLE 共存时
+         * 这正是压垮内部堆的最后一根稻草：WiFi 连上后剩 107KB，Bluedroid 一init
+         * 只剩 10KB，随后 BLE_INIT: Malloc failed / HCI status=0x7。
+         * 显示帧缓冲本来就在 PSRAM（display_port.cpp），控件内存跟着过去，
+         * 内部 RAM 整块还给 WiFi/BLE 协议栈。渲染速度几乎无感：
+         * 绘制目标是 PSRAM 帧缓冲，瓶颈早就不在控件内存这边。 */
+        #define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>
+        #define LV_MEM_POOL_ALLOC(size) heap_caps_malloc((size), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
     #endif
 
 #else       /*LV_MEM_CUSTOM*/

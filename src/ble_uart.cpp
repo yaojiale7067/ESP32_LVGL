@@ -233,6 +233,13 @@ void bleuart_init(void)
 
     Serial.printf("[BLE] init as \"%s\" ...\n", BLE_DEVICE_NAME);
     BLEDevice::init(BLE_DEVICE_NAME);
+    // 协议栈一初始化就预先吃掉一大块内部堆；esp_wifi_init 需要连续 4 块 RX
+    // 静态缓冲，被 BLE 抢走后就会 NO_MEM(257) 初始化失败 —— 表现为 WiFi 永远
+    // 连不上、十秒一次 Reconnecting。BLE_Task 内部已等待 g_wifiInitDone，
+    // 这里再保险一次：打印实际堆量，方便以后换芯片时对照。
+    Serial.printf("[BLE] heap after stack init: %u KB (psram %u KB)\n",
+                  (unsigned)(ESP.getFreeHeap() / 1024),
+                  (unsigned)(ESP.getFreePsram() / 1024));
     BLEDevice::setMTU(247);                  // 单包最多 ~244 字节有效载荷
 
     ble_server = BLEDevice::createServer();

@@ -30,6 +30,8 @@
 #include "ui_test/screens/ui_wscan.h"        // 信道占用分析屏
 #include "ui_test/screens/ui_relay.h"        // 继电器（GPIO41）控制屏
 #include "ui_test/screens/ui_led.h"          // WS2812 灯带（GPIO39）控制屏
+#include "ui_test/screens/ui_rfmon.h"        // RF Monitor（802.11 被动监听）
+#include "rf_monitor.h"                      // 被动监听数据层（只收不发）
 #if ENABLE_BLE
 #include "ui_test/screens/ui_ble.h"
 #endif
@@ -1346,6 +1348,12 @@ void wifi_scan_request() {
         ui_set_status_ex("Scan already running...", UIK_C_WARN_TEXT);
         return;
     }
+    if (rfmon_is_active()) {
+        // RF Monitor 在跳频采集，此时 scanNetworks 会抢射频、两边数据都废。
+        // WiFi_Task 那边也会拒，但在这里先说清楚原因，免得用户只看到转圈超时。
+        ui_set_status_ex("Stop RF Monitor first", UIK_C_ERR_TEXT);
+        return;
+    }
     if (!wifiScanRequestQueue || !wifiScanResultQueue) {
         ui_set_status_ex("WiFi queues not ready", UIK_C_ERR_TEXT);
         return;
@@ -1580,6 +1588,11 @@ static void wscan_render_bars() {
 void wscan_request() {
     if (wscan_state != WSCAN_IDLE) {
         ui_wscan_set_status("Scan already running...", UIK_C_WARN_TEXT);
+        return;
+    }
+    if (rfmon_is_active()) {
+        // 同上：跳频监听期间不能扫信道
+        ui_wscan_set_status("Stop RF Monitor first", UIK_C_ERR_TEXT);
         return;
     }
     if (!wifiChanScanReqQueue || !wifiChanScanResQueue) {
@@ -1949,6 +1962,240 @@ void ui_led_on_screen_ready(void) {
 } /* extern "C" */
 
 
+// ============================================================================
+//  RF Monitor（802.11 管理帧被动监听，数据层在 src/rf_monitor.cpp）
+//  ----------------------------------------------------------------------------
+//  这里只把 rfmon_stats_t 快照翻译成 ui_rfmon_* 调用，不碰射频。
+//  轮询节流：500ms 一次，且只在屏建好时刷新；所有 set_* 内部都是
+//  "先比后写"，静止时零 SPI 流量（这条工程铁律见 dht11/wifi 屏）。
+//
+//  列表模式二选一：
+//    · 抓到过 deauth/disassoc -> 显示"谁在踢设备"（源 MAC + 厂商 + 帧数），红标题
+//    · 否则                  -> 显示被动收到的 AP 表（SSID/MAC + 信道 + 信标数）
+//  deauth 模式优先：这一屏的主要用途就是排查"网络老掉线是不是被人打了"。
+// ============================================================================
+static unsigned long rfmon_last_poll = 0;
+static bool          rfmon_logging = false;   // 日志开关，定义见下方 rfmon_log_tick 区块
+
+// 按帧数降序排出 deauth 源，最多取 UI_RFMON_MAX_ROWS 个
+static int rfmon_fill_deauth_entries(const rfmon_stats_t& st, ui_rfmon_entry_t* ent) {
+    // 表很小（<=8），直接选择排序到 ent，避免改动快照
+    bool used[RFMON_MAX_DEAUTH_SRC] = { false };
+    int n = 0;
+    while (n < UI_RFMON_MAX_ROWS) {
+        int best = -1;
+        for (int i = 0; i < RFMON_MAX_DEAUTH_SRC; i++) {
+            if (used[i] || st.deauth_srcs[i].frames == 0) continue;
+            if (best < 0 || st.deauth_srcs[i].frames > st.deauth_srcs[best].frames) best = i;
+        }
+        if (best < 0) break;
+        used[best] = true;
+        char mac[18];
+        rfmon_mac_str(st.deauth_srcs[best].bssid, mac);
+        const char* ven = rfmon_oui_vendor(st.deauth_srcs[best].bssid);
+        snprintf(ent[n].name, sizeof(ent[n].name), "%s%s%s", mac,
+                 (ven[0] != '?') ? " " : "", (ven[0] != '?') ? ven : "");
+        snprintf(ent[n].right, sizeof(ent[n].right), "x%u",
+                 (unsigned)st.deauth_srcs[best].frames);
+        n++;
+    }
+    return n;
+}
+
+// AP 表按信标数降序（活跃度高的排前面）
+static int rfmon_fill_ap_entries(const rfmon_stats_t& st, ui_rfmon_entry_t* ent) {
+    bool used[RFMON_MAX_AP] = { false };
+    int n = 0;
+    while (n < UI_RFMON_MAX_ROWS) {
+        int best = -1;
+        for (int i = 0; i < RFMON_MAX_AP; i++) {
+            if (used[i] || st.aps[i].beacons == 0) continue;
+            if (best < 0 || st.aps[i].beacons > st.aps[best].beacons) best = i;
+        }
+        if (best < 0) break;
+        used[best] = true;
+        const rfmon_ap_t& a = st.aps[best];
+        char mac[18];
+        rfmon_mac_str(a.bssid, mac);
+        if (a.ssid[0] != '\0') {
+            const char* ven = rfmon_oui_vendor(a.bssid);
+            snprintf(ent[n].name, sizeof(ent[n].name), "%s%s%s", a.ssid,
+                     (ven[0] != '?') ? " " : "", (ven[0] != '?') ? ven : "");
+        } else {
+            snprintf(ent[n].name, sizeof(ent[n].name), "<hidden> %s", mac);
+        }
+        snprintf(ent[n].right, sizeof(ent[n].right), "CH%d x%u",
+                 (int)a.ch, (unsigned)a.beacons);
+        n++;
+    }
+    return n;
+}
+
+static void rfmon_poll_ui() {
+    if (ui_rfmon == NULL) return;                    // 屏没建，别浪费
+    if (millis() - rfmon_last_poll < 500) return;    // 500ms 节流
+    rfmon_last_poll = millis();
+
+    rfmon_stats_t st;
+    rfmon_get_stats(&st);
+
+    ui_rfmon_set_running(st.active);
+    ui_rfmon_set_counts(st.beacons, st.probes, st.deauths, st.disassoc);
+
+    ui_rfmon_entry_t ent[UI_RFMON_MAX_ROWS];
+    int n;
+    bool deauth_mode = (st.deauths > 0 || st.disassoc > 0) && st.deauth_src_count > 0;
+    if (deauth_mode) {
+        n = rfmon_fill_deauth_entries(st, ent);
+        char hdr[48];
+        snprintf(hdr, sizeof(hdr), "DEAUTH SOURCES " LV_SYMBOL_BULLET " %u",
+                 (unsigned)(st.deauths + st.disassoc));
+        ui_rfmon_set_header(hdr, UIK_C_ERR_TEXT);
+    } else {
+        n = rfmon_fill_ap_entries(st, ent);
+        char hdr[48];
+        snprintf(hdr, sizeof(hdr), "BEACONS SEEN " LV_SYMBOL_BULLET " %u AP",
+                 (unsigned)st.ap_count);
+        ui_rfmon_set_header(hdr, UIK_C_TEXT_DIM);
+    }
+    ui_rfmon_set_list(st.version, deauth_mode, n, ent);
+
+    char stat[96];
+    if (st.active) {
+        snprintf(stat, sizeof(stat), "Listening CH%d " LV_SYMBOL_BULLET
+                 " WiFi paused " LV_SYMBOL_BULLET " log %s",
+                 (int)st.channel, rfmon_logging ? "ON" : "off");
+        ui_rfmon_set_status(stat, UIK_C_OK_TEXT);
+    } else if (st.beacons + st.deauths + st.probes + st.disassoc > 0) {
+        snprintf(stat, sizeof(stat), "Stopped " LV_SYMBOL_BULLET " %u frames " LV_SYMBOL_BULLET " /rfmon.csv",
+                 (unsigned)(st.beacons + st.deauths + st.probes + st.disassoc));
+        ui_rfmon_set_status(stat, UIK_C_TEXT_DIM);
+    }
+    // 从未启动过时保留 screen_init 里写好的那句提示，不覆盖
+}
+
+// 串口 /rfmon：不依赖屏幕也能采集/查看
+static void rfmon_serial_dump() {
+    rfmon_stats_t st;
+    rfmon_get_stats(&st);
+    Serial.printf("\n=== RF Monitor (%s) CH%d ===\n",
+                  st.active ? "LIVE" : "stopped", (int)st.channel);
+    Serial.printf("beacons=%u probes=%u deauth=%u disassoc=%u\n",
+                  (unsigned)st.beacons, (unsigned)st.probes,
+                  (unsigned)st.deauths, (unsigned)st.disassoc);
+    if (st.deauth_src_count) {
+        Serial.println("deauth sources:");
+        for (int i = 0; i < RFMON_MAX_DEAUTH_SRC; i++) {
+            if (st.deauth_srcs[i].frames == 0) continue;
+            char mac[18]; rfmon_mac_str(st.deauth_srcs[i].bssid, mac);
+            Serial.printf("  %s %-10s x%u\n", mac,
+                          rfmon_oui_vendor(st.deauth_srcs[i].bssid),
+                          (unsigned)st.deauth_srcs[i].frames);
+        }
+    }
+    if (st.ap_count) {
+        Serial.println("APs seen:");
+        for (int i = 0; i < RFMON_MAX_AP; i++) {
+            if (st.aps[i].beacons == 0) continue;
+            char mac[18]; rfmon_mac_str(st.aps[i].bssid, mac);
+            Serial.printf("  CH%-2d %4ddBm %s %-9s %s x%u\n",
+                          (int)st.aps[i].ch, (int)st.aps[i].rssi, mac,
+                          rfmon_oui_vendor(st.aps[i].bssid),
+                          st.aps[i].ssid[0] ? st.aps[i].ssid : "<hidden>",
+                          (unsigned)st.aps[i].beacons);
+        }
+    }
+    Serial.println("==========================\n");
+}
+
+// ---- RF Monitor 的 SD 日志存储 -------------------------------------------
+//  监听时把"谁在发 deauth/disassoc"逐条落盘，外加每 10s 一条活动汇总，
+//  这样事后能对着时间线复盘"网络几点掉线、被哪个 MAC 打的"。
+//  文件 /rfmon.csv，追加模式，和 dht11.json 一样单文件累积。
+//  ★ 默认跟随监听开关：一开始监听就自动记（前提是 SD 就绪），
+//    串口 `rfmon log off` 可临时关掉，避免不想要时的 SD 写入。
+//  ★ SD 写入走 SD_LOCK（和 TFT 共用 SPI 总线，靠这把锁串行化），
+//    与混杂回调用的 s_mux 是两把不同的锁，互不干扰、无死锁风险。
+//  （rfmon_logging 的声明在文件前部 rfmon_last_poll 旁边）
+static unsigned long rfmon_last_log      = 0;
+static unsigned long rfmon_last_summary  = 0;
+static bool          rfmon_was_active    = false;
+static uint16_t      rfmon_logged_frames[RFMON_MAX_DEAUTH_SRC] = { 0 };
+
+static void rfmon_log_reset() {
+    for (int i = 0; i < RFMON_MAX_DEAUTH_SRC; i++) rfmon_logged_frames[i] = 0;
+    rfmon_last_summary = 0;
+}
+
+static void rfmon_log_tick() {
+    unsigned long now = millis();
+    if (now - rfmon_last_log < 1000) return;   // 1s 节流，先判后取快照
+    rfmon_last_log = now;
+
+    rfmon_stats_t st;
+    rfmon_get_stats(&st);
+
+    // 会话边沿：从不活跃 -> 活跃时，重置增量计数并按需自动开启日志
+    if (st.active && !rfmon_was_active) {
+        rfmon_log_reset();
+        if (sd_initialized) rfmon_logging = true;
+    }
+    rfmon_was_active = st.active;
+
+    if (!rfmon_logging) return;
+
+    SD_LOCK();
+    bool isNew = !SD.exists("/rfmon.csv");
+    File f = SD.open("/rfmon.csv", FILE_APPEND);
+    if (!f) { SD_UNLOCK(); return; }
+    if (isNew)
+        f.println("ts_s,event,ch,mac,vendor,delta,ap,beacon,probe,deauth,disassoc");
+    unsigned long ts = now / 1000;
+
+    // 1) 每个源新增的 deauth/disassoc 帧（按 delta 记，避免重复）
+    for (int i = 0; i < RFMON_MAX_DEAUTH_SRC; i++) {
+        if (st.deauth_srcs[i].frames == 0) continue;
+        if (st.deauth_srcs[i].frames > rfmon_logged_frames[i]) {
+            uint16_t delta = (uint16_t)(st.deauth_srcs[i].frames - rfmon_logged_frames[i]);
+            rfmon_logged_frames[i] = st.deauth_srcs[i].frames;
+            char mac[18];
+            rfmon_mac_str(st.deauth_srcs[i].bssid, mac);
+            f.printf("%lu,DEAUTH,%d,%s,%s,%u,,,,,\n", ts, (int)st.channel, mac,
+                     rfmon_oui_vendor(st.deauth_srcs[i].bssid), (unsigned)delta);
+        }
+    }
+    // 2) 每 10s 一条汇总（时间序列：AP 数 + 四类帧累计）
+    if (rfmon_last_summary == 0 || now - rfmon_last_summary >= 10000UL) {
+        rfmon_last_summary = now;
+        f.printf("%lu,SUMMARY,%d,,,,%u,%u,%u,%u,%u\n", ts, (int)st.channel,
+                 (unsigned)st.ap_count, (unsigned)st.beacons, (unsigned)st.probes,
+                 (unsigned)st.deauths, (unsigned)st.disassoc);
+    }
+    f.close();
+    SD_UNLOCK();
+}
+
+extern "C" {
+
+void ui_rfmon_on_toggle(void) {
+    if (rfmon_is_active()) {
+        rfmon_stop();
+    } else {
+        rfmon_start();
+    }
+    // 立刻刷一次，不等 500ms 节流，按钮态/状态条即时反映
+    rfmon_last_poll = 0;
+    rfmon_poll_ui();
+}
+
+void ui_rfmon_on_screen_ready(void) {
+    rfmon_last_poll = 0;
+    rfmon_poll_ui();
+}
+
+} /* extern "C" */
+
+
 // 系统信息 / 时间 / 串口命令
 void print_system_info() {
     Serial.println("\n========================================");
@@ -2059,11 +2306,76 @@ void process_serial_command(const String& cmd_in) {
         else if (sscanf(cmd.c_str(), "led count %d", &v) == 1)  led_apply(UI_LED_COUNT, v);
         else Serial.println("usage: led hue|bright|speed|count <n> | led status");
     }
+    // RF Monitor：被动监听也能全串口驱动（无屏排障 / 远程采集）。
+    // dump 输出 deauth 源和 AP 表，格式对齐 /chan 的风格。
+    else if (cmd == "rfmon start") {
+        rfmon_start();
+        Serial.println("[rfmon] started, 'rfmon dump' for a snapshot");
+    }
+    else if (cmd == "rfmon stop") {
+        rfmon_stop();
+    }
+    else if (cmd == "rfmon status") {
+        rfmon_stats_t st;
+        rfmon_get_stats(&st);
+        Serial.printf("rfmon: %s CH%d bcn=%u prb=%u deauth=%u disas=%u aps=%u\n",
+                      st.active ? "LIVE" : "stopped", (int)st.channel,
+                      (unsigned)st.beacons, (unsigned)st.probes,
+                      (unsigned)st.deauths, (unsigned)st.disassoc,
+                      (unsigned)st.ap_count);
+    }
+    else if (cmd == "rfmon clear") {
+        rfmon_clear();
+        Serial.println("[rfmon] counters cleared");
+    }
+    else if (cmd == "rfmon dump") {
+        rfmon_serial_dump();
+    }
+    // 日志开关：默认随监听自动开（见 rfmon_log_tick），这里可手动干预
+    else if (cmd == "rfmon log on") {
+        if (!sd_initialized) {
+            Serial.println("rfmon log: SD not mounted, cannot log");
+        } else {
+            rfmon_logging = true;
+            Serial.println("rfmon log: ON -> /rfmon.csv");
+        }
+    }
+    else if (cmd == "rfmon log off") {
+        rfmon_logging = false;
+        Serial.println("rfmon log: OFF (auto-enable on next rfmon start is disabled until reboot or 'log on')");
+    }
+    else if (cmd == "rfmon log status") {
+        Serial.printf("rfmon log: %s (SD %s, file /rfmon.csv)\n",
+                      rfmon_logging ? "ON" : "OFF",
+                      sd_initialized ? "mounted" : "NOT mounted");
+    }
+    // 打印日志尾部，不用拔卡就能核对落盘内容
+    else if (cmd == "rfmon log tail") {
+        if (!sd_initialized) { Serial.println("SD not mounted"); }
+        else {
+            SD_LOCK();
+            File f = SD.open("/rfmon.csv", FILE_READ);
+            if (!f) { SD_UNLOCK(); Serial.println("/rfmon.csv not found"); }
+            else {
+                size_t sz = f.size();
+                size_t from = (sz > 768) ? (sz - 768) : 0;
+                f.seek(from);
+                Serial.printf("--- /rfmon.csv (%u bytes, last %u) ---\n",
+                              (unsigned)sz, (unsigned)(sz - from));
+                while (f.available()) Serial.write(f.read());
+                Serial.println("--- end ---");
+                f.close();
+                SD_UNLOCK();
+            }
+        }
+    }
     else if (cmd == "help") {
         Serial.println("/dht11 profile start | stop | status");
         Serial.println("/chan scan | /chan");
         Serial.println("relay on | relay off | relay status");
         Serial.println("led hue|bright|speed|count <n> | led status");
+        Serial.println("rfmon start | stop | status | clear | dump");
+        Serial.println("rfmon log on | off | status | tail");
         Serial.println("fetch | date | reboot");
     }
     else {
@@ -2192,6 +2504,8 @@ void original_loop() {
 
     if (wifi_scan_state != WSCAN_IDLE) wifi_scan_poll();
     if (wscan_state != WSCAN_IDLE) wscan_poll();
+    rfmon_poll_ui();   // 内部自带 500ms 节流 + 屏判空，未建屏时开销≈0
+    rfmon_log_tick();  // 未在监听时第一句就 return（1s 节流之后才取快照）
 
 #if ENABLE_BLE
     // BLE 只在这里碰 LVGL：core1 的 BLE 任务只往缓冲里塞数据

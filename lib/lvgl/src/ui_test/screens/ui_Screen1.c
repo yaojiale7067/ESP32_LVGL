@@ -27,6 +27,7 @@
 #include "../ui_kit.h"
 #include "ui_relay.h"    // ui_relay / ui_relay_screen_init
 #include "ui_led.h"      // ui_led / ui_led_screen_init
+#include "ui_rfmon.h"    // ui_rfmon / ui_rfmon_screen_init
 #if ENABLE_BLE
 #include "ui_ble.h"      // ui_ble / ble_set_prev_screen
 #endif
@@ -49,6 +50,8 @@ static lv_obj_t * ui_ButtonRelay = NULL;  // Relay（GPIO41 设备开关）
 static lv_obj_t * ui_LabelRelay = NULL;
 static lv_obj_t * ui_ButtonLed = NULL;    // LED Strip（WS2812 / GPIO39）
 static lv_obj_t * ui_LabelLed = NULL;
+static lv_obj_t * ui_ButtonRfmon = NULL;  // RF Monitor（802.11 被动监听）
+static lv_obj_t * ui_LabelRfmon = NULL;
 static lv_obj_t * menu_cont = NULL;       // 可滚动菜单容器
 
 // ---- 菜单行的点击处理（统一用无动画切换，视觉上更干净）--------------------
@@ -82,6 +85,11 @@ static void go_led_cb(lv_event_t * e)
 {
     (void)e;
     _ui_screen_change(&ui_led, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_led_screen_init);
+}
+static void go_rfmon_cb(lv_event_t * e)
+{
+    (void)e;
+    _ui_screen_change(&ui_rfmon, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_rfmon_screen_init);
 }
 
 // 注意：本文件按 C 编译，**不能用 lambda**，回调必须是普通静态函数
@@ -212,6 +220,15 @@ void ui_Screen1_screen_init(void)
                                      UIK_ACCENT_HUM, UIK_C_SURFACE,
                                      go_led_cb, NULL, &ui_LabelLed);
 
+    // RF Monitor —— 眼睛符号（0xF06E），品红身份色。
+    // 说明：这一屏是**被动接收**的 802.11 管理帧分析（deauth 源 / AP 表 /
+    // probe 统计），只收不发。发射类功能（deauth 注入、beacon 洪泛、
+    // Sour Apple 之类）不在这里，见 rf_monitor.cpp 顶部说明。
+    ui_ButtonRfmon = uik_menu_row_icon(menu_cont, 0, 0, MENU_ROW_W, UIK_ROW_H,
+                                       LV_SYMBOL_EYE_OPEN, "RF Monitor",
+                                       UIK_ACCENT_MON, UIK_C_SURFACE,
+                                       go_rfmon_cb, NULL, &ui_LabelRfmon);
+
     uic_Screen1 = ui_Screen1;
 }
 
@@ -236,5 +253,7 @@ void ui_Screen1_screen_destroy(void)
     ui_LabelRelay = NULL;
     ui_ButtonLed = NULL;
     ui_LabelLed = NULL;
+    ui_ButtonRfmon = NULL;
+    ui_LabelRfmon = NULL;
     menu_cont = NULL;
 }

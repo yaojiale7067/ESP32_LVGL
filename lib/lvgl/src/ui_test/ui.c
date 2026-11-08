@@ -67,4 +67,5 @@ void ui_destroy(void)
     ui_wscan_screen_destroy();   // 懒创建的屏，函数内部已判 NULL，没建过就是空操作
     ui_relay_screen_destroy();   // 同上
     ui_led_screen_destroy();     // 同上
+    ui_rfmon_screen_destroy();   // 同上
 }

@@ -80,6 +80,7 @@ extern "C" {
 #define UIK_ACCENT_BLE     0x9B7CF5   // 蓝牙：靛紫
 #define UIK_ACCENT_HUM     0x4FC3D9   // 湿度：浅青
 #define UIK_ACCENT_CHIP    0xE07A7A   // 片内温度：暖红
+#define UIK_ACCENT_MON     0xD65DB1   // RF Monitor：品红（和靛紫/暖红都拉得开）
 #define UIK_FONT_TITLE   (&lv_font_montserrat_14)
 #define UIK_FONT_BODY    (&lv_font_montserrat_12)
 #define UIK_FONT_HINT    (&lv_font_montserrat_10)

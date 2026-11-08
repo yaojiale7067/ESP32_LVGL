@@ -18,9 +18,15 @@ void FT6336::begin(uint8_t _addr) {
 
 uint8_t FT6336::reset() {
   uint8_t tmp[2];
-  pinMode(pinInt, INPUT);
+  // INT 脚可以不接（touch.h 传 -1，转成 uint8_t 是 255）：
+  // 对无效引脚调 pinMode/digitalWrite 会打
+  // "Invalid pin selected" + "GPIO output gpio_num error" 两条错误日志，
+  // 虽然无害但每次开机都刷，还会淹掉真正要看的错误。跳过即可。
+  if(digitalPinIsValid(pinInt)) {
+    pinMode(pinInt, INPUT);
+    digitalWrite(pinInt, 1);
+  }
   pinMode(pinRst, OUTPUT);
-  digitalWrite(pinInt, 1);
   digitalWrite(pinRst, 1);
   delay(20);
   digitalWrite(pinRst, 0);

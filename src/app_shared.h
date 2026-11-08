@@ -105,6 +105,21 @@ extern QueueHandle_t serialCmdQueue;         // loop(core1)-> UI(core0)
 extern WifiConfigMsg_t   g_wifiBootCfg;      // 开机配置（SD 加载或内置兜底）
 extern SemaphoreHandle_t g_sdMutex;          // SD 文件系统递归锁
 
+// ---- 802.11 被动监听（rf_monitor.cpp）与 WiFi_Task 之间的协作标志 ----
+// g_rfmonActive：监听期间为 true。WiFi_Task 必须据此停下来 ——
+//   · 不做 reconnect（会和跳频抢信道）
+//   · 不受理扫描请求（scanNetworks 会打断跳频，且拖十秒以上）
+// g_wifiForceReconnect：监听结束时置位，让 WiFi_Task 跳过 10s 退避立刻重连。
+extern volatile bool g_rfmonActive;
+extern volatile bool g_wifiForceReconnect;
+
+// ---- WiFi / BLE 初始化顺序协作 ----
+// esp_wifi_init 需要 4 块连续的静态 RX 缓冲（内部 DMA RAM），
+// Bluedroid 协议栈一次要吃几十 KB 内部堆。谁先起决定成败：
+// BLE 先起 -> WiFi 初始化报 "Expected to init 4 rx buffer, actual is 3"（NO_MEM 257）
+// -> begin 失败 -> 永远 Reconnecting。所以 BLE_Task 要等这个标志。
+extern volatile bool g_wifiInitDone;
+
 // 一次拿两把锁：顺序永远是 SD -> SPI 总线，不可反过来（否则可能环路死锁）
 #define SD_LOCK()                                                                      \
     do {                                                                               \

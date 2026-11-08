@@ -4,6 +4,7 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <WiFi.h>
+#include <esp_wifi.h>    // esp_wifi_get_mac：探测驱动是否真的初始化成功
 
 #include "app_shared.h"
 
@@ -23,6 +24,9 @@ QueueHandle_t serialCmdQueue       = NULL;
 
 WifiConfigMsg_t   g_wifiBootCfg;
 SemaphoreHandle_t g_sdMutex = NULL;
+
+// WiFi 必须先于 BLE 完成 esp_wifi_init（见 WiFi_Task / BLE_Task 注释）
+volatile bool g_wifiInitDone = false;
 
 // 静态初始化阶段建锁，保证 storage_mount() 在任何调用点都有锁可拿
 namespace { struct SdMutexInit { SdMutexInit() { g_sdMutex = xSemaphoreCreateRecursiveMutex(); } } sdMutexInit; }
@@ -52,6 +56,20 @@ void SD_Task(void* pvParameters) {
 
 void BLE_Task(void* pvParameters) {
     (void)pvParameters;
+    // ★ 必须先等 WiFi 完成 esp_wifi_init！
+    //   实测日志（复现"WiFi 一直重连"）：
+    //     [BLE] init as "ESP32S3-BLE-UART" ...          <- 3.3s，Bluedroid 先吃内部堆
+    //     E wifi: Expected to init 4 rx buffer, actual is 3
+    //     E wifi_init: Failed to deinit Wi-Fi driver (0x3001)
+    //     [WiFiGeneric] esp_wifi_init 257                <- 257 = ESP_ERR_NO_MEM
+    //     [WiFiSTA] begin(): STA enable failed!
+    //   原因：esp_wifi_init 要申请 4 块连续的 RX 静态缓冲（内部 DMA 区），
+    //   Bluedroid 一次吃掉三十多 KB 内部堆后就申请不到了，于是 WiFi 永远起不来，
+    //   WiFi_Task 每 10s 打印一次 Reconnecting。
+    //   内部 RAM 是 WiFi/BLE 共用的稀缺资源（8MB PSRAM 帮不上，协议栈只在内部 RAM）。
+    //   等 WiFi 初始化完成后再起 BLE，两边各得其所；最多多等 3s，开机无感。
+    while (!g_wifiInitDone) vTaskDelay(pdMS_TO_TICKS(100));
+
     vTaskDelay(pdMS_TO_TICKS(500));
     bleuart_init();
 
@@ -166,7 +184,19 @@ void WiFi_Task(void* pvParameters) {
     strncpy(cfg.ssid, g_wifiBootCfg.ssid, sizeof(cfg.ssid) - 1);
     strncpy(cfg.password, g_wifiBootCfg.password, sizeof(cfg.password) - 1);
 
+    // WiFi.mode 内部完成 esp_wifi_init —— 必须赶在 Bluedroid 之前（见 BLE_Task 注释）。
+    // 成功后才放行 BLE_Task。
     WiFi.mode(WIFI_STA);
+    g_wifiInitDone = true;
+
+    // 探测驱动是否真的起来了：esp_wifi_get_mac 在未初始化时返回错误。
+    // 起不来的话，盲目 Reconnecting 没有意义，日志会把话说清楚。
+    uint8_t mac[6] = {0};
+    if (esp_wifi_get_mac(WIFI_IF_STA, mac) != ESP_OK) {
+        Serial.println("[WiFi_Task] FATAL: wifi driver init failed, retries will not help.");
+        Serial.println("[WiFi_Task] (usually Bluedroid grabbed internal RAM first — check boot order)");
+    }
+
     if (cfg.ssid[0] != '\0') {
         Serial.printf("[WiFi_Task] Connecting to: %s\n", cfg.ssid);
         WiFi.begin(cfg.ssid, cfg.password);
@@ -177,6 +207,8 @@ void WiFi_Task(void* pvParameters) {
     bool hasConfig     = (cfg.ssid[0] != '\0');
     bool wasConnected  = false;
     unsigned long lastReconnect = 0;
+    int  reconnectFails = 0;      // 连续重连失败次数，用于把"一直重连"的日志降噪
+    unsigned long lastFailLog   = 0;
 
     while (1) {
         // 接收来自 UI 的新配置
@@ -194,50 +226,75 @@ void WiFi_Task(void* pvParameters) {
         // 扫描请求
         ScanRequestMsg_t scanReq;
         if (xQueueReceive(wifiScanRequestQueue, &scanReq, 0) == pdTRUE) {
-            Serial.println("[WiFi_Task] Scanning...");
+            if (g_rfmonActive) {
+                // 被动监听期间不能扫：scanNetworks 会抢射频信道、打断跳频统计
+                Serial.println("[WiFi_Task] scan refused: rfmon active");
+            } else {
+                Serial.println("[WiFi_Task] Scanning...");
 
-            ScanResultMsg_t result;                 // 1654B，任务栈 12KB 够用
-            memset(&result, 0, sizeof(result));     // 必须整块清零，否则 count<50 时后面是栈垃圾
-            int n = WiFi.scanNetworks();
-            if (n < 0) {
-                Serial.printf("[WiFi_Task] scanNetworks failed: %d\n", n);
-                n = 0;
-            }
-            if (n > APP_SCAN_MAX_AP) n = APP_SCAN_MAX_AP;
+                ScanResultMsg_t result;                 // 1654B，任务栈 12KB 够用
+                memset(&result, 0, sizeof(result));     // 必须整块清零，否则 count<50 时后面是栈垃圾
+                int n = WiFi.scanNetworks();
+                if (n < 0) {
+                    Serial.printf("[WiFi_Task] scanNetworks failed: %d\n", n);
+                    n = 0;
+                }
+                if (n > APP_SCAN_MAX_AP) n = APP_SCAN_MAX_AP;
 
-            result.count = n;
-            for (int i = 0; i < n; i++) {
-                strncpy(result.ssids[i], WiFi.SSID(i).c_str(), APP_SSID_MAX_LEN - 1);
-                result.ssids[i][APP_SSID_MAX_LEN - 1] = '\0';
-            }
-            WiFi.scanDelete();
+                result.count = n;
+                for (int i = 0; i < n; i++) {
+                    strncpy(result.ssids[i], WiFi.SSID(i).c_str(), APP_SSID_MAX_LEN - 1);
+                    result.ssids[i][APP_SSID_MAX_LEN - 1] = '\0';
+                }
+                WiFi.scanDelete();
 
-            if (xQueueSend(wifiScanResultQueue, &result, pdMS_TO_TICKS(1000)) != pdTRUE) {
-                Serial.println("[WiFi_Task] result queue full, scan dropped");
+                if (xQueueSend(wifiScanResultQueue, &result, pdMS_TO_TICKS(1000)) != pdTRUE) {
+                    Serial.println("[WiFi_Task] result queue full, scan dropped");
+                }
+                Serial.printf("[WiFi_Task] Scan complete, %d networks\n", n);
             }
-            Serial.printf("[WiFi_Task] Scan complete, %d networks\n", n);
         }
 
         // 信道扫描请求（信道占用分析工具）
         ChanScanReq_t chanReq;
         if (xQueueReceive(wifiChanScanReqQueue, &chanReq, 0) == pdTRUE) {
-            wifi_run_channel_scan();
+            if (g_rfmonActive) {
+                Serial.println("[WiFi_Task] chan scan refused: rfmon active");
+            } else {
+                wifi_run_channel_scan();
+            }
         }
 
         // 维护连接状态
         bool isConnected = (WiFi.status() == WL_CONNECTED);
         if (isConnected && !wasConnected) {
             Serial.printf("[WiFi_Task] Connected, IP=%s\n", WiFi.localIP().toString().c_str());
+            if (reconnectFails > 0)
+                Serial.printf("[WiFi_Task] reconnected after %d failed attempt(s)\n", reconnectFails);
+            reconnectFails = 0;
         }
         wasConnected = isConnected;
 
-        if (!isConnected && hasConfig) {
+        // rfmon 停止后立刻重连（清掉 10s 退避），别让用户等
+        if (g_wifiForceReconnect && !g_rfmonActive) {
+            g_wifiForceReconnect = false;
+            lastReconnect = 0;
+        }
+
+        if (!isConnected && hasConfig && !g_rfmonActive) {
             // reconnect() 会阻塞 2s 以上，放慢到 10s 一次，
             // 避免反复打断 core1 上的 DHT11 读取（读一次要关中断 1~2s）
             if (millis() - lastReconnect > 10000UL) {
-                Serial.println("[WiFi_Task] Reconnecting...");
+                // 日志降噪：前 3 次逐条打（方便看时序），之后每 5 分钟一条，
+                // 免得"一直重连"把串口刷爆、把真正的原因冲掉。
+                if (reconnectFails < 3 || millis() - lastFailLog > 300000UL) {
+                    Serial.printf("[WiFi_Task] Reconnecting... (attempt %d, status=%d)\n",
+                                  reconnectFails + 1, (int)WiFi.status());
+                    lastFailLog = millis();
+                }
                 WiFi.reconnect();
                 lastReconnect = millis();
+                reconnectFails++;
             }
         }
 
