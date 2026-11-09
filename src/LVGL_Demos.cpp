@@ -302,66 +302,13 @@ static void sntp_start_once(void)
     Serial.println("[TIME] SNTP started (pool.ntp.org / time.nist.gov)");
 }
 
-#if ENABLE_CLOCK
-// 用年号判断是否已校时（sntp_get_sync_status 在不同 IDF 版本里头文件位置不一致）。
-// 只有时钟功能需要它，所以一起用 ENABLE_CLOCK 包住，否则关时钟会报 -Wunused-function。
-static bool time_is_synced(void)
-{
-    time_t now = time(nullptr);
-    if (now < 100000) return false;                 // 还没跨过 1970-01-02
-    struct tm t;
-    if (localtime_r(&now, &t) == nullptr) return false;
-    return (t.tm_year + 1900) >= 2020;
-}
-#endif  // ENABLE_CLOCK
 
-#if ENABLE_CLOCK
-// 刷新屏幕时钟（东八区）。只在秒变化时才 set_text，避免每个 tick 都重绘。
-static void clock_update_once_per_second(void)
-{
-    if (ui_dht11_clock == NULL) return;
-
-    static unsigned long last_ms = 0;
-    static int last_sec = -1;
-
-    unsigned long now_ms = millis();
-    if (now_ms - last_ms < 250) return;             // 不必比 4Hz 更勤
-    last_ms = now_ms;
-
-    if (!time_is_synced()) {
-        // 未同步时显示占位符，而不是 1970 年那种假时间
-        if (last_sec != -2) {
-            last_sec = -2;
-            lv_label_set_text(ui_dht11_clock, "--:--:--  (waiting NTP)");
-            lv_obj_set_style_text_color(ui_dht11_clock, lv_color_hex(UIK_C_TEXT_DIM),
-                                        LV_STATE_DEFAULT);
-        }
-        // WiFi 连上后自动开始校时（幂等）
-        if (WiFi.status() == WL_CONNECTED) sntp_start_once();
-        return;
-    }
-
-    time_t now_t = time(nullptr);
-    struct tm t;
-    if (localtime_r(&now_t, &t) == nullptr) return;
-    if (t.tm_sec == last_sec) return;               // 同一秒内不重复设文本
-    last_sec = t.tm_sec;
-
-    char buf[24];
-    strftime(buf, sizeof(buf), "%H:%M:%S", &t);
-    lv_label_set_text(ui_dht11_clock, buf);
-    lv_obj_set_style_text_color(ui_dht11_clock, lv_color_hex(UIK_C_TEXT), LV_STATE_DEFAULT);
-}
-#endif  // ENABLE_CLOCK
 
 // 定时器只负责显示，读不读由 dht_read_cached 的限速决定
 void dht_timer_cb(lv_timer_t* timer) {
     (void)timer;
     update_dht11_display();
     update_chip_temp_display();         // 片内温度（内部另有 5 秒限速）
-#if ENABLE_CLOCK
-    clock_update_once_per_second();
-#endif
 }
 
 // 保证温湿度标签是干净的占位符；函数名保留给 original_setup() 的调用点。
