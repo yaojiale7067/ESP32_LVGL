@@ -38,7 +38,7 @@ typedef struct {
 //  2.4GHz 只有 1..13（ESP32 在 CN 区不用 14），20MHz 带宽实际横跨 5 个信道，
 //  所以"信道 n 有多脏"看的是 n-2..n+2 范围内的 AP 总数（load），不是只看 n。
 // ============================================================================
-#define APP_CSCAN_MAX_AP  32            // 详情表最多保留多少个 AP（按 RSSI 取最强的）
+#define APP_CSCAN_MAX_AP  12            // 详情表最多保留多少个 AP（按 RSSI 取最强的）
 #define WCH_MIN           1
 #define WCH_MAX           13
 #define WCH_SLOTS         (WCH_MAX + 1) // 按信道号当下标：[0] 不用，[1..13] 有效
