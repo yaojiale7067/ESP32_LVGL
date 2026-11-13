@@ -31,7 +31,9 @@
 #include "ui_test/screens/ui_relay.h"        // 继电器（GPIO41）控制屏
 #include "ui_test/screens/ui_led.h"          // WS2812 灯带（GPIO39）控制屏
 #include "ui_test/screens/ui_rfmon.h"        // RF Monitor（802.11 被动监听）
+#include "ui_test/screens/ui_nrf.h"          // nRF24 嗅探屏（2.4G 私有协议，被动）
 #include "rf_monitor.h"                      // 被动监听数据层（只收不发）
+#include "nrf24.h"                           // nRF24L01+ 嗅探数据层（只收不发）
 #if ENABLE_BLE
 #include "ui_test/screens/ui_ble.h"
 #endif
@@ -1108,34 +1110,54 @@ void paste_file(const char* dest_dir) {
 // TXT 串口发送：分片推进，避免在按键回调里阻塞
 #define TX_MAX_BYTES   (256 * 1024)
 #define TX_CHUNK_BYTES 128      // 每轮最多 128B（115200 下约 11ms），保证 LVGL 仍有 ~30fps
+// cat 走同一条发送链路，但上限放宽到 1MB：很多日志/JSON 超过 256KB，
+// 内容整段落在 PSRAM（8MB），不会挤占 WiFi/BLE 的内部堆。
+#define CAT_MAX_BYTES  (1024 * 1024)
 
-void send_txt_via_serial(const char* path) {
+static String tx_tag = "TXT";   // 传输横幅里的标签：TXT（文件屏）/ CAT（命令行）
+
+// 通用文件->串口发送。tag 决定横幅文字，max_bytes 是这次允许的大小上限。
+// 失败时把原因写进 *err（可为 NULL），返回 false。
+static bool send_file_via_serial(const char* path, const char* tag,
+                                 size_t max_bytes, String* err) {
     if (tx_buffer != nullptr) {
-        ui_set_status("A transfer is already running", UIK_C_WARN_TEXT);
-        return;
+        if (err) *err = "A transfer is already running";
+        return false;
     }
 
     SD_LOCK();
     File file = SD.open(path);
     if (!file) {
         SD_UNLOCK();
-        ui_set_status("Cannot open file!", UIK_C_ERR_TEXT);
-        return;
+        if (err) *err = "Cannot open file!";
+        return false;
     }
-    size_t fsize = file.size();
-    if (fsize == 0 || fsize > TX_MAX_BYTES) {
+    if (file.isDirectory()) {
         file.close();
         SD_UNLOCK();
-        ui_set_status(fsize == 0 ? "Empty file" : "File too big (>256KB)", UIK_C_WARN_TEXT);
-        return;
+        if (err) *err = "That is a directory";
+        return false;
+    }
+    size_t fsize = file.size();
+    if (fsize == 0) {
+        file.close();
+        SD_UNLOCK();
+        if (err) *err = "Empty file";
+        return false;
+    }
+    if (fsize > max_bytes) {
+        file.close();
+        SD_UNLOCK();
+        if (err) *err = "File too big for this command";
+        return false;
     }
     char* buffer = (char*)heap_caps_malloc(fsize + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (buffer == nullptr) buffer = (char*)malloc(fsize + 1);
     if (buffer == nullptr) {
         file.close();
         SD_UNLOCK();
-        ui_set_status("Out of memory for TXT buffer", UIK_C_ERR_TEXT);
-        return;
+        if (err) *err = "Out of memory for buffer";
+        return false;
     }
     size_t got = file.read((uint8_t*)buffer, fsize);
     file.close();
@@ -1146,12 +1168,22 @@ void send_txt_via_serial(const char* path) {
     tx_len    = got;
     tx_sent   = 0;
     tx_file   = String(path);
+    tx_tag    = String(tag);
 
-    Serial.println("\n========================================");
-    Serial.println("SENDING TXT FILE VIA SERIAL");
-    Serial.println("========================================");
-    Serial.printf("File: %s (%u bytes)\n", path, (unsigned)got);
+    Serial.printf("\n========================================\n");
+    Serial.printf("%s: %s\n", tag, path);
+    Serial.printf("----------------------------------------\n");
+    Serial.printf("%u bytes\n", (unsigned)got);
     Serial.println("----------------------------------------");
+    return true;
+}
+
+void send_txt_via_serial(const char* path) {
+    String err;
+    if (!send_file_via_serial(path, "SENDING TXT FILE VIA SERIAL", TX_MAX_BYTES, &err)) {
+        ui_set_status(err.c_str(), UIK_C_ERR_TEXT);
+        return;
+    }
     ui_set_status("Sending over serial...", UIK_C_WARN_TEXT);
 }
 
@@ -1174,7 +1206,8 @@ void pump_txt_transfer() {
     if (tx_sent >= tx_len) {
         Serial.println();
         Serial.println("----------------------------------------");
-        Serial.printf("TXT file sent: %s (%u bytes)\n", tx_file.c_str(), (unsigned)tx_len);
+        Serial.printf("%s done: %s (%u bytes)\n", tx_tag.c_str(),
+                      tx_file.c_str(), (unsigned)tx_len);
         Serial.println("========================================\n");
         char msg[96];
         snprintf(msg, sizeof(msg), "Sent: %s (%u bytes)",
@@ -1787,7 +1820,8 @@ bool ui_relay_get_hw_state(void) {
 //  ★ 上电默认：count=1（先点亮一颗，确认接线/供电再往上加）、
 //    brightness=190（约 75%，满亮度对供电要求高）、hue=200（蓝）。
 // ============================================================================
-#define WS2812_PIN        40
+ #define WS2812_PIN        48    //这是板载ws2812
+//#define WS2812_PIN        39
 #define WS2812_RMT_CH     RMT_CHANNEL_1      // 通道 0 留空，避免和潜在外设撞车
 #define WS2812_MAX_LEDS   UI_LED_COUNT_MAX   // 120
 #define WS2812_CLK_DIV    2                  // 80MHz/2 -> 25ns/tick
@@ -2196,6 +2230,153 @@ void ui_rfmon_on_screen_ready(void) {
 } /* extern "C" */
 
 
+// ============================================================================
+//  nRF24 嗅探（数据层在 src/nrf24.cpp，只收不发）
+//  ----------------------------------------------------------------------------
+//  同 rfmon 的规矩：500ms 节流轮询，屏没建时零开销；抓到的包逐条落盘
+//  /nrf.csv（seq 增量判断，绝不重复写）。
+//  握手失败时：屏显示 HW=NO、按钮置灰，串口给出引脚表 + 3.3V 提醒。
+// ============================================================================
+static unsigned long nrf_last_poll = 0;
+static unsigned long nrf_last_log  = 0;
+static uint32_t      nrf_logged_seq = 0;   // 已落盘的最大 seq
+
+static const char* nrf_rate_name(uint8_t r) {
+    static const char* t[3] = { "1M", "2M", "250K" };
+    return t[r & 3];
+}
+
+static void nrf_poll_ui() {
+    if (ui_nrf == NULL) return;
+    if (millis() - nrf_last_poll < 500) return;
+    nrf_last_poll = millis();
+
+    nrf_stats_t st;
+    nrf_get_stats(&st);
+
+    ui_nrf_set_running(st.active, st.available);
+    ui_nrf_set_stats(st.packets, st.channel, st.rate_idx, st.hopping, st.available);
+
+    // 列表：ring [0] 最新，按顺序转行（"#123  00AA5F2E..."）
+    ui_nrf_entry_t ent[UI_NRF_MAX_ROWS];
+    int n = st.pkt_count < UI_NRF_MAX_ROWS ? st.pkt_count : UI_NRF_MAX_ROWS;
+    for (int i = 0; i < n; i++) {
+        const nrf_pkt_t& p = st.pkts[i];
+        // hex 前缀最多 12 字节（24 字符），后面省略号；全量在 /nrf.csv
+        char hex[32];
+        int hl = p.len > 12 ? 12 : p.len;
+        int pos = 0;
+        for (int b = 0; b < hl && pos + 2 < (int)sizeof(hex); b++)
+            pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X", p.data[b]);
+        if (p.len > 12 && pos + 1 < (int)sizeof(hex)) { hex[pos++] = '.'; hex[pos] = '\0'; }
+        snprintf(ent[i].name, sizeof(ent[i].name), "#%u %s", (unsigned)p.seq, hex);
+        snprintf(ent[i].right, sizeof(ent[i].right), "CH%d %s", (int)p.ch, nrf_rate_name(p.rate));
+    }
+    ui_nrf_set_list(st.version, n, ent);
+
+    char hdr[52];
+    if (!st.available) {
+        ui_nrf_set_header("NO MODULE " LV_SYMBOL_BULLET " check wiring / 3.3V", UIK_C_ERR_TEXT);
+        ui_nrf_set_status("CE14 CSN15 SCK16 MISO17 MOSI18" LV_SYMBOL_BULLET "VCC=3.3V", UIK_C_WARN_TEXT);
+    } else if (st.active) {
+        snprintf(hdr, sizeof(hdr), "CAPTURED " LV_SYMBOL_BULLET " %u pkts",
+                 (unsigned)st.packets);
+        ui_nrf_set_header(hdr, st.packets > 0 ? UIK_C_OK_TEXT : UIK_C_TEXT_DIM);
+        snprintf(hdr, sizeof(hdr), "Sniffing CH%d %s" LV_SYMBOL_BULLET " RX only",
+                 (int)st.channel, st.hopping ? "hop" : "fix");
+        ui_nrf_set_status(hdr, UIK_C_OK_TEXT);
+    } else {
+        snprintf(hdr, sizeof(hdr), "STOPPED " LV_SYMBOL_BULLET " %u pkts " LV_SYMBOL_BULLET " /nrf.csv",
+                 (unsigned)st.packets);
+        ui_nrf_set_header(hdr, UIK_C_TEXT_DIM);
+        ui_nrf_set_status("Idle " LV_SYMBOL_BULLET " tap Scan to listen (passive)", UIK_C_TEXT_DIM);
+    }
+}
+
+// SD 落盘：/nrf.csv，按 seq 增量（每包一行，含全量 hex）
+static void nrf_log_tick() {
+    unsigned long now = millis();
+    if (now - nrf_last_log < 1000) return;
+    nrf_last_log = now;
+    if (!sd_initialized) return;
+
+    nrf_stats_t st;
+    nrf_get_stats(&st);
+    if (!st.available || st.pkt_count == 0) return;
+    if (st.pkts[0].seq <= nrf_logged_seq) return;      // 没有新包
+
+    SD_LOCK();
+    bool isNew = !SD.exists("/nrf.csv");
+    File f = SD.open("/nrf.csv", FILE_APPEND);
+    if (!f) { SD_UNLOCK(); return; }
+    if (isNew) f.println("ts_s,seq,ch,rate,len,hex");
+    // ring 是 [0] 最新：从旧到新遍历，seq > logged 的都补上
+    for (int i = st.pkt_count - 1; i >= 0; i--) {
+        const nrf_pkt_t& p = st.pkts[i];
+        if (p.seq <= nrf_logged_seq) continue;
+        char hex[NRF_PKT_MAX * 2 + 1];
+        int pos = 0;
+        for (int b = 0; b < p.len; b++) pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X", p.data[b]);
+        f.printf("%lu,%u,%u,%s,%u,%s\n", now / 1000, (unsigned)p.seq,
+                 (unsigned)p.ch, nrf_rate_name(p.rate), (unsigned)p.len, hex);
+        if (p.seq > nrf_logged_seq) nrf_logged_seq = p.seq;
+    }
+    f.close();
+    SD_UNLOCK();
+}
+
+static void nrf_serial_dump() {
+    nrf_stats_t st;
+    nrf_get_stats(&st);
+    Serial.printf("\n=== nRF24 (%s) CH%d %s ===\n",
+                  !st.available ? "NO MODULE" : (st.active ? "LIVE" : "stopped"),
+                  (int)st.channel, nrf_rate_name(st.rate_idx));
+    if (!st.available) {
+        Serial.println("No nRF24L01+ detected. Check:");
+        Serial.println("  CE=14 CSN=15 SCK=16 MISO=17 MOSI=18  (src/nrf24.h)");
+        Serial.println("  VCC=3.3V (5V destroys the module), GND common,");
+        Serial.println("  10uF + 0.1uF decoupling right at the module's VCC/GND pins.");
+    }
+    Serial.printf("packets=%u (logged up to seq=%u)\n",
+                  (unsigned)st.packets, (unsigned)nrf_logged_seq);
+    for (int i = 0; i < st.pkt_count; i++) {
+        const nrf_pkt_t& p = st.pkts[i];
+        Serial.printf("  #%u CH%d %s len=%u : ", (unsigned)p.seq, (int)p.ch,
+                      nrf_rate_name(p.rate), (unsigned)p.len);
+        for (int b = 0; b < p.len; b++) Serial.printf("%02X", p.data[b]);
+        Serial.println();
+    }
+    Serial.println("==========================\n");
+}
+
+extern "C" {
+
+void ui_nrf_on_toggle(void) {
+    nrf_stats_t st;
+    nrf_get_stats(&st);
+    if (!st.available) {
+        // 每次点击都重新试一遍 init（模块可能刚插上/刚上电）
+        if (!nrf_sniffer_init()) {
+            Serial.println("[nrf] no module detected — 'nrf dump' shows the wiring checklist");
+            nrf_last_poll = 0;
+            nrf_poll_ui();
+            return;
+        }
+    }
+    if (nrf_sniffer_active()) nrf_sniffer_stop();
+    else                      nrf_sniffer_start(-1);   // -1 = 跳频全扫
+    nrf_last_poll = 0;
+    nrf_poll_ui();
+}
+
+void ui_nrf_on_screen_ready(void) {
+    nrf_last_poll = 0;
+    nrf_poll_ui();
+}
+
+} /* extern "C" */
+
+
 // 系统信息 / 时间 / 串口命令
 void print_system_info() {
     Serial.println("\n========================================");
@@ -2241,6 +2422,103 @@ void get_ntp_time() {
     Serial.printf("Current time (UTC+8): %s\n", timeStr);
 }
 
+// ============================================================================
+//  CLI：SD 卡文件操作（ls / cat / stat / rm / save）
+//  ----------------------------------------------------------------------------
+//  参数一律取【原始大小写】：cmd 已经整体小写化，但路径不该被篡改
+//  （FAT 本身不区分大小写，可 quoted 文件名/混合大小写日志名保持原貌更安全）。
+//  cat 复用文件屏那条分片发送链路（128B/轮，由 original_loop 的
+//  pump_txt_transfer 推进），所以 256KB 大文件也不会卡住 LVGL。
+// ============================================================================
+static String cli_path_arg(const String& original) {
+    String s = original;
+    s.trim();
+    if (s.startsWith("/")) s = s.substring(1);      // 和 cmd 的处理保持一致
+    int sp = s.indexOf(' ');
+    if (sp < 0) return String("");
+    String a = s.substring(sp + 1);
+    a.trim();
+    // 允许 cat "my file.txt" / cat 'my file.txt'
+    if (a.length() >= 2 && (a[0] == '"' || a[0] == '\'') && a[a.length() - 1] == a[0])
+        a = a.substring(1, a.length() - 1);
+    a.trim();
+    if (a.length() == 0) return a;
+    if (!a.startsWith("/")) a = "/" + a;
+    return a;
+}
+
+// 目录项打印：name() 在不同 core 版本下有时带路径、有时只有基名，统一补全，
+// 这样 ls 的输出可以直接复制给 cat 用。
+static void cli_print_dir(const String& dir) {
+    SD_LOCK();
+    File root = SD.open(dir);
+    if (!root || !root.isDirectory()) {
+        if (root) root.close();
+        SD_UNLOCK();
+        Serial.printf("ls: not a directory: %s\n", dir.c_str());
+        return;
+    }
+    Serial.printf("--- %s ---\n", dir.c_str());
+    File f = root.openNextFile();
+    int n = 0;
+    uint64_t total = 0;
+    bool truncated = false;
+    while (f) {
+        if (n >= 80) { truncated = true; f.close(); break; }
+        String nm = f.name();
+        if (!nm.startsWith("/")) {
+            String base = dir;
+            if (!base.endsWith("/")) base += "/";
+            nm = base + nm;
+        }
+        if (f.isDirectory()) {
+            Serial.printf("DIR       -  %s\n", nm.c_str());
+        } else {
+            unsigned sz = (unsigned)f.size();
+            total += sz;
+            Serial.printf("FILE %7u  %s\n", sz, nm.c_str());
+        }
+        n++;
+        f.close();                                  // 不关会漏项/耗句柄
+        f = root.openNextFile();
+    }
+    root.close();
+    SD_UNLOCK();
+    Serial.printf("--- %d entr%s, %llu bytes%s ---\n", n, (n == 1) ? "y" : "ies",
+                  (unsigned long long)total, truncated ? " (truncated at 80)" : "");
+}
+
+static void cli_file_stat(const String& path) {
+    SD_LOCK();
+    bool exists = SD.exists(path);
+    if (!exists) { SD_UNLOCK(); Serial.printf("stat: not found: %s\n", path.c_str()); return; }
+    File f = SD.open(path);
+    if (!f) { SD_UNLOCK(); Serial.printf("stat: cannot open: %s\n", path.c_str()); return; }
+    bool isDir = f.isDirectory();
+    unsigned sz = isDir ? 0 : (unsigned)f.size();
+    f.close();
+    SD_UNLOCK();
+    Serial.printf("path : %s\ntype : %s\nsize : %u bytes\n",
+                  path.c_str(), isDir ? "directory" : "file", sz);
+}
+
+static void cli_file_rm(const String& path) {
+    if (path == "/" || path.length() < 2) {
+        Serial.println("rm: refusing to delete the root directory");
+        return;
+    }
+    SD_LOCK();
+    if (!SD.exists(path)) { SD_UNLOCK(); Serial.printf("rm: not found: %s\n", path.c_str()); return; }
+    File f = SD.open(path);
+    bool isDir = f ? f.isDirectory() : false;
+    unsigned sz = (isDir || !f) ? 0 : (unsigned)f.size();
+    if (f) f.close();
+    bool ok = isDir ? SD.rmdir(path) : SD.remove(path);
+    SD_UNLOCK();
+    Serial.printf("rm: %s %s (%s, %u bytes)\n", ok ? "deleted" : "FAILED",
+                  path.c_str(), isDir ? "dir" : "file", sz);
+}
+
 void process_serial_command(const String& cmd_in) {
     String cmd = cmd_in;
     cmd.trim();
@@ -2278,6 +2556,48 @@ void process_serial_command(const String& cmd_in) {
     }
     // 继电器：和屏幕上的开关走同一个 relay_set()，
     // 所以串口改了状态，界面（如果开着）也会同步。
+    // ---- 文件系统 CLI ----------------------------------------------------
+    //  ls [dir]        列目录（最多 80 项，输出可直接喂给 cat）
+    //  cat <file>      把文件内容整段发到串口（复用文件屏的分片链路）
+    //  stat <path>     看类型/大小
+    //  rm <path>       删文件或空目录
+    // 路径取原始大小写的参数，注意用 cli_path_arg() 而不是 cmd。
+    else if (cmd == "ls") {
+        cli_print_dir(current_path);
+    }
+    else if (cmd.startsWith("ls ")) {
+        String p = cli_path_arg(cmd_in);
+        cli_print_dir(p.length() ? p : current_path);
+    }
+    else if (cmd.startsWith("cat ")) {
+        String p = cli_path_arg(cmd_in);
+        if (p.length() == 0) {
+            Serial.println("usage: cat /file.txt");
+        } else {
+            // 先 exists 再 open：直接 open 不存在的路径会在 VFS 里刷一行
+            // "no permits for creation" 的红色错误，纯噪音。
+            SD_LOCK();
+            bool there = SD.exists(p);
+            SD_UNLOCK();
+            if (!there) {
+                Serial.printf("cat: not found: %s\n", p.c_str());
+            } else {
+                String err;
+                if (!send_file_via_serial(p.c_str(), "CAT", CAT_MAX_BYTES, &err))
+                    Serial.printf("cat: %s (%s)\n", p.c_str(), err.c_str());
+            }
+        }
+    }
+    else if (cmd.startsWith("stat ")) {
+        String p = cli_path_arg(cmd_in);
+        if (p.length() == 0) Serial.println("usage: stat /file.txt");
+        else cli_file_stat(p);
+    }
+    else if (cmd.startsWith("rm ")) {
+        String p = cli_path_arg(cmd_in);
+        if (p.length() == 0) Serial.println("usage: rm /file.txt");
+        else cli_file_rm(p);
+    }
     else if (cmd == "relay on") {
         relay_set(true);
     }
@@ -2369,6 +2689,46 @@ void process_serial_command(const String& cmd_in) {
             }
         }
     }
+    // nRF24 嗅探：和 rfmon 一样全串口可驱动。
+    // `nrf sniff` 跳频全扫（2..80 × 三种速率）；`nrf sniff <ch>` 锁单信道。
+    else if (cmd == "nrf start" || cmd == "nrf sniff") {
+        if (!nrf_sniffer_init()) {
+            Serial.println("[nrf] no module detected — 'nrf dump' shows the wiring checklist");
+        } else {
+            nrf_sniffer_start(-1);
+            Serial.println("[nrf] started, 'nrf dump' for a snapshot");
+        }
+    }
+    else if (cmd.startsWith("nrf sniff ")) {
+        int ch = 0;
+        if (sscanf(cmd.c_str(), "nrf sniff %d", &ch) == 1 && ch >= 0 && ch <= 125) {
+            if (!nrf_sniffer_init()) {
+                Serial.println("[nrf] no module detected — 'nrf dump' shows the wiring checklist");
+            } else {
+                nrf_sniffer_start(ch);
+            }
+        } else {
+            Serial.println("usage: nrf sniff <0..125> | nrf sniff (hopping)");
+        }
+    }
+    else if (cmd == "nrf stop") {
+        nrf_sniffer_stop();
+    }
+    else if (cmd == "nrf status") {
+        nrf_stats_t st;
+        nrf_get_stats(&st);
+        Serial.printf("nrf: %s CH%d %s pkts=%u logged=%u\n",
+                      !st.available ? "NO MODULE" : (st.active ? "LIVE" : "stopped"),
+                      (int)st.channel, nrf_rate_name(st.rate_idx),
+                      (unsigned)st.packets, (unsigned)nrf_logged_seq);
+    }
+    else if (cmd == "nrf dump") {
+        nrf_serial_dump();
+    }
+    else if (cmd == "nrf clear") {
+        nrf_clear_stats();
+        Serial.println("[nrf] counters cleared");
+    }
     else if (cmd == "help") {
         Serial.println("/dht11 profile start | stop | status");
         Serial.println("/chan scan | /chan");
@@ -2376,6 +2736,8 @@ void process_serial_command(const String& cmd_in) {
         Serial.println("led hue|bright|speed|count <n> | led status");
         Serial.println("rfmon start | stop | status | clear | dump");
         Serial.println("rfmon log on | off | status | tail");
+        Serial.println("nrf sniff [ch] | stop | status | dump | clear");
+        Serial.println("ls [dir] | cat <file> | stat <path> | rm <path>");
         Serial.println("fetch | date | reboot");
     }
     else {
@@ -2506,6 +2868,8 @@ void original_loop() {
     if (wscan_state != WSCAN_IDLE) wscan_poll();
     rfmon_poll_ui();   // 内部自带 500ms 节流 + 屏判空，未建屏时开销≈0
     rfmon_log_tick();  // 未在监听时第一句就 return（1s 节流之后才取快照）
+    nrf_poll_ui();     // nRF24 嗅探屏：同样 500ms 节流 + 屏判空
+    nrf_log_tick();    // /nrf.csv 增量落盘：没新包第一句就 return
 
 #if ENABLE_BLE
     // BLE 只在这里碰 LVGL：core1 的 BLE 任务只往缓冲里塞数据

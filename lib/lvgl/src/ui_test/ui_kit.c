@@ -14,6 +14,43 @@ static lv_style_t st_ta_focus;        // 输入框获得焦点的描边
 
 static bool kit_theme_ready = false;
 
+// ---------------------------------------------------------------------------
+//  带中文 fallback 的字体副本
+//  ---------------------------------------------------------------------------
+//  lv_font_t 是可拷贝的结构体（get_glyph_dsc / fallback 都只是指针），
+//  所以这里各复制一份主字体、把 fallback 指向生成的中文字库即可，
+//  不必改 LVGL 自带的 .c 文件，也不影响别处直接用 lv_font_montserrat_1x 的地方。
+//  ★ 行高仍然取主字体的 line_height（12pt=15 / 14pt=17），
+//    中文比它高时靠 LVGL 的 baseline 对齐，不会把行撑开 ——
+//    这点很关键：list 行高 25px 是按 15 行高算的，撑开就会破坏"整行数"布局。
+static lv_font_t font_body_cjk;
+static lv_font_t font_title_cjk;
+
+static void kit_fonts_init(void)
+{
+    static bool done = false;
+    if (done) return;
+    done = true;
+
+    font_body_cjk = lv_font_montserrat_12;
+    font_body_cjk.fallback = &ui_font_cjk12;
+
+    font_title_cjk = lv_font_montserrat_14;
+    font_title_cjk.fallback = &ui_font_cjk12;
+}
+
+const lv_font_t * uik_font_body(void)
+{
+    kit_fonts_init();
+    return &font_body_cjk;
+}
+
+const lv_font_t * uik_font_title(void)
+{
+    kit_fonts_init();
+    return &font_title_cjk;
+}
+
 static void kit_theme_init(void)
 {
     if (kit_theme_ready) return;

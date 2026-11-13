@@ -68,4 +68,5 @@ void ui_destroy(void)
     ui_relay_screen_destroy();   // 同上
     ui_led_screen_destroy();     // 同上
     ui_rfmon_screen_destroy();   // 同上
+    ui_nrf_screen_destroy();     // 同上
 }

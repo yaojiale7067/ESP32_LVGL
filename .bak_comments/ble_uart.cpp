@@ -1,0 +1,392 @@
+// ble_uart.cpp - BLE 串口（Nordic UART Service，NUS）
+//
+// ESP32-S3 没有经典蓝牙(BR/EDR)，BluetoothSerial / SPP 不可用，只能走 GATT。
+// 线程模型：GATT 回调跑在 Bluedroid 自己的线程里，只允许碰环形缓冲和 volatile
+// 标志，绝不碰 LVGL；LVGL 对象只在 core0 的 LVGL 任务里修改。
+
+#include <Arduino.h>
+#include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+#include "app_shared.h"
+#include "ui_test/screens/ui_ble.h"
+
+// 关闭 ENABLE_BLE 时本文件编译为空，不留下悬空符号
+#if ENABLE_BLE
+
+#define BLE_DEVICE_NAME   "ESP32S3-BLE-UART"
+#define NUS_SERVICE_UUID  "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define NUS_RX_CHAR_UUID  "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"   // 手机 → 设备
+#define NUS_TX_CHAR_UUID  "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"   // 设备 → 手机
+
+// 这一组变量只在此处定义一次（app_shared.h 里 extern 声明）
+volatile uint8_t  g_bleRxRing[BLE_RX_RING_SIZE];
+volatile uint16_t g_bleRxHead = 0;
+volatile uint16_t g_bleRxTail = 0;
+portMUX_TYPE      g_bleRxMux = portMUX_INITIALIZER_UNLOCKED;
+volatile bool     g_bleConnected = false;
+volatile uint32_t g_bleRxTotal = 0;
+volatile bool     g_bleRxPending = false;   // core1 置位，core0 消费
+char              g_blePeerAddr[20] = {0};
+
+static BLEServer*         ble_server = NULL;
+static BLECharacteristic* ble_tx_char = NULL;    // notify 用
+static BLEAdvertising*    ble_adv    = NULL;
+static volatile bool      ble_ready  = false;    // 协议栈已就绪，可以收/发
+
+// 接收显示缓冲。长度和 ui_ble.h 里的 BLE_RX_MAX_CHARS 对齐，
+// 这样接收区不设 max_length 也不会被塞进超出缓冲的文本。
+static char     rx_disp[BLE_RX_MAX_CHARS + 1];
+static uint16_t rx_disp_len = 0;
+static volatile bool rx_dirty = false;
+static uint32_t last_pump_ms = 0;
+
+// rx_disp / rx_disp_len 有两个写者：LVGL 任务里的发送回显，以及 BLE 任务的 pump。
+// 不加锁会互相覆盖 rx_disp_len，接收区变成交错乱码（"发送时花屏"）。
+// 用临界区而非互斥量：写入只是 512B 的 memcpy，且不能在协议栈线程里冒
+// 优先级继承断言的风险。
+static portMUX_TYPE rx_disp_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static uint32_t tx_total = 0;
+
+#define BLE_PUMP_INTERVAL_MS 150     // 每 150ms 刷一次接收区，避免频繁重绘
+
+// 环形缓冲：只由 BLE 回调线程写，LVGL 任务读
+static void ble_ring_push(const uint8_t* data, size_t len)
+{
+    if (data == NULL || len == 0) return;
+    portENTER_CRITICAL(&g_bleRxMux);
+    for (size_t i = 0; i < len; i++) {
+        uint16_t next = (uint16_t)((g_bleRxHead + 1) & (BLE_RX_RING_SIZE - 1));
+        if (next == g_bleRxTail) break;          // 满了丢新数据，不覆盖旧的
+        g_bleRxRing[g_bleRxHead] = data[i];
+        g_bleRxHead = next;
+    }
+    portEXIT_CRITICAL(&g_bleRxMux);
+}
+
+static size_t ble_ring_pop(uint8_t* out, size_t max_len)
+{
+    if (out == NULL || max_len == 0) return 0;
+    size_t n = 0;
+    portENTER_CRITICAL(&g_bleRxMux);
+    while (n < max_len && g_bleRxTail != g_bleRxHead) {
+        out[n++] = g_bleRxRing[g_bleRxTail];
+        g_bleRxTail = (uint16_t)((g_bleRxTail + 1) & (BLE_RX_RING_SIZE - 1));
+    }
+    portEXIT_CRITICAL(&g_bleRxMux);
+    return n;
+}
+
+// 接收显示缓冲：满了丢掉最老的一半（保留结尾，和串口助手行为一致）。
+// 所有写入都必须在 rx_disp_mux 临界区里进行（两个核都会写）。
+static void rx_disp_append_unlocked(const char* s, size_t n)
+{
+    if (n == 0) return;
+    if (n >= sizeof(rx_disp)) {
+        s += (n - (sizeof(rx_disp) - 1));
+        n  = sizeof(rx_disp) - 1;
+        rx_disp_len = 0;
+    }
+    if (rx_disp_len + n > sizeof(rx_disp) - 1) {
+        uint16_t keep = (uint16_t)((sizeof(rx_disp) - 1) / 2);
+        memmove(rx_disp, rx_disp + (rx_disp_len - keep), keep);
+        rx_disp_len = keep;
+    }
+    memcpy(rx_disp + rx_disp_len, s, n);
+    rx_disp_len = (uint16_t)(rx_disp_len + n);
+    rx_disp[rx_disp_len] = '\0';
+    rx_dirty = true;
+}
+
+static void rx_disp_append(const char* s, size_t n)
+{
+    if (s == NULL || n == 0) return;
+    portENTER_CRITICAL(&rx_disp_mux);
+    rx_disp_append_unlocked(s, n);
+    portEXIT_CRITICAL(&rx_disp_mux);
+}
+
+// 把不可见字符转成 '.'，避免 \0 / 控制字符把 LVGL 的文本渲染搞乱
+static void rx_disp_append_sanitized(const uint8_t* data, size_t len)
+{
+    char tmp[64];
+    size_t k = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        uint8_t c = data[i];
+        if (c == '\r' || c == '\n' || c == '\t') tmp[k++] = (char)c;
+        else if (c < 0x20 || c == 0x7F)          tmp[k++] = '.';
+        else                                     tmp[k++] = (char)c;
+        if (k == sizeof(tmp) - 1) {
+            tmp[k] = '\0';
+            rx_disp_append(tmp, k);
+            k = 0;
+        }
+    }
+    if (k > 0) {
+        tmp[k] = '\0';
+        rx_disp_append(tmp, k);
+    }
+}
+
+// UI 刷新：只在 LVGL 任务里调用
+void ui_ble_set_status(void)
+{
+    if (ui_ble_status_label == NULL) return;
+    char buf[64];
+    if (!ble_ready) {
+        snprintf(buf, sizeof(buf), LV_SYMBOL_BULLET " BLE off");
+        lv_label_set_text(ui_ble_status_label, buf);
+        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(UIK_C_ERR_TEXT), LV_STATE_DEFAULT);
+        return;
+    }
+    if (g_bleConnected) {
+        snprintf(buf, sizeof(buf), LV_SYMBOL_BULLET " Connected  %s  RX %u / TX %u",
+                 g_blePeerAddr, (unsigned)g_bleRxTotal, (unsigned)tx_total);
+        lv_label_set_text(ui_ble_status_label, buf);
+        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(UIK_C_OK_TEXT), LV_STATE_DEFAULT);
+    } else {
+        snprintf(buf, sizeof(buf), LV_SYMBOL_BULLET " Advertising as %s", BLE_DEVICE_NAME);
+        lv_label_set_text(ui_ble_status_label, buf);
+        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(UIK_C_WARN_TEXT), LV_STATE_DEFAULT);
+    }
+}
+
+// 先快照（临界区，几微秒），再放开锁去动 LVGL：
+// 不能在临界区里调 lv_textarea_set_text，那会把蓝牙协议栈的中断响应拖长。
+//
+// 注意这里【不能】再判 rx_dirty：pump() 把 rx_dirty 清掉之后才置 g_bleRxPending，
+// 所以进到本函数时它一定是 false。原来那句 `if (... || !rx_dirty) return;`
+// 会让每次刷新都提前返回，接收区永远显示不出真正收到的内容。
+static void ui_ble_refresh_rx(void)
+{
+    if (ui_ble_rx_ta == NULL) return;
+
+    static char snapshot[sizeof(rx_disp)];
+    portENTER_CRITICAL(&rx_disp_mux);
+    rx_dirty = false;
+    memcpy(snapshot, rx_disp, (size_t)rx_disp_len + 1);
+    portEXIT_CRITICAL(&rx_disp_mux);
+
+    lv_textarea_set_text(ui_ble_rx_ta, snapshot);
+    lv_textarea_set_cursor_pos(ui_ble_rx_ta, LV_TEXTAREA_CURSOR_LAST);
+}
+
+// BLE 回调跑在协议栈线程，禁止碰 LVGL
+class BleServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer* srv) override
+    {
+        (void)srv;
+        g_bleConnected = true;
+        String addr = BLEDevice::getAddress().toString().c_str();
+        strncpy(g_blePeerAddr, addr.c_str(), sizeof(g_blePeerAddr) - 1);
+        g_blePeerAddr[sizeof(g_blePeerAddr) - 1] = '\0';
+        Serial.printf("[BLE] connected: %s\n", g_blePeerAddr);
+    }
+    void onDisconnect(BLEServer* srv) override
+    {
+        g_bleConnected = false;
+        g_blePeerAddr[0] = '\0';
+        Serial.println("[BLE] disconnected, restart advertising");
+        // 断连后必须重新开始广播，否则手机再也搜不到
+        if (ble_adv) {
+            BLEDevice::startAdvertising();
+        }
+        (void)srv;
+    }
+};
+
+class BleRxCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic* ch) override
+    {
+        // 新版核心会走带 param 的重载，这里保留是为了兼容旧签名
+        if (ch == NULL) return;
+        uint8_t* data = ch->getData();
+        size_t   len  = ch->getLength();
+        if (data == NULL || len == 0) return;
+        ble_ring_push(data, len);
+        g_bleRxTotal += (uint32_t)len;
+    }
+    void onWrite(BLECharacteristic* ch, esp_ble_gatts_cb_param_t* param) override
+    {
+        if (ch == NULL || param == NULL) return;
+        uint8_t* data = ch->getData();
+        size_t   len  = param->write.len;
+        if (data == NULL || len == 0) return;
+        if (len > ch->getLength()) len = ch->getLength();   // 防御：不越界读
+        ble_ring_push(data, len);
+        g_bleRxTotal += (uint32_t)len;
+    }
+};
+
+// 由 BLE 任务调用（放在 setup() 里会拖慢启动）
+void bleuart_init(void)
+{
+    if (ble_ready) return;
+
+    Serial.printf("[BLE] init as \"%s\" ...\n", BLE_DEVICE_NAME);
+    BLEDevice::init(BLE_DEVICE_NAME);
+    // 协议栈一初始化就预先吃掉一大块内部堆；esp_wifi_init 需要连续 4 块 RX
+    // 静态缓冲，被 BLE 抢走后就会 NO_MEM(257) 初始化失败 —— 表现为 WiFi 永远
+    // 连不上、十秒一次 Reconnecting。BLE_Task 内部已等待 g_wifiInitDone，
+    // 这里再保险一次：打印实际堆量，方便以后换芯片时对照。
+    Serial.printf("[BLE] heap after stack init: %u KB (psram %u KB)\n",
+                  (unsigned)(ESP.getFreeHeap() / 1024),
+                  (unsigned)(ESP.getFreePsram() / 1024));
+    BLEDevice::setMTU(247);                  // 单包最多 ~244 字节有效载荷
+
+    ble_server = BLEDevice::createServer();
+    if (ble_server == NULL) {
+        Serial.println("[BLE] createServer failed");
+        return;
+    }
+    ble_server->setCallbacks(new BleServerCallbacks());
+
+    BLEService* svc = ble_server->createService(NUS_SERVICE_UUID);
+    if (svc == NULL) {
+        Serial.println("[BLE] createService failed");
+        return;
+    }
+
+    // TX：设备 → 手机（notify）
+    ble_tx_char = svc->createCharacteristic(
+        NUS_TX_CHAR_UUID,
+        BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
+    ble_tx_char->addDescriptor(new BLE2902());
+
+    // RX：手机 → 设备（write / write without response）
+    BLECharacteristic* rx_char = svc->createCharacteristic(
+        NUS_RX_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    rx_char->setCallbacks(new BleRxCallbacks());
+
+    svc->start();
+
+    ble_adv = BLEDevice::getAdvertising();
+    if (ble_adv) {
+        ble_adv->addServiceUUID(NUS_SERVICE_UUID);
+        ble_adv->setScanResponse(true);
+        ble_adv->setMinInterval(0x20);       // 20ms
+        ble_adv->setMaxInterval(0x40);       // 40ms
+        BLEDevice::startAdvertising();
+    }
+
+    ble_ready = true;
+    Serial.println("[BLE] advertising started (NUS service)");
+}
+
+// 每帧任务（core1）：把环形缓冲搬进显示缓冲
+void bleuart_pump(void)
+{
+    if (!ble_ready) return;
+
+    uint8_t tmp[64];
+    size_t n;
+    while ((n = ble_ring_pop(tmp, sizeof(tmp))) > 0) {
+        rx_disp_append_sanitized(tmp, n);
+    }
+
+    uint32_t now = millis();
+    if (rx_dirty && (now - last_pump_ms) >= BLE_PUMP_INTERVAL_MS) {
+        last_pump_ms = now;
+        rx_dirty = false;
+        // 不能在 core1 碰 LVGL：置个标志让 LVGL 任务去刷
+        g_bleRxPending = true;
+    }
+}
+
+bool bleuart_is_connected(void) { return g_bleConnected; }
+bool bleuart_is_ready(void)     { return ble_ready; }
+
+size_t bleuart_send(const char* data, size_t len)
+{
+    if (data == NULL || len == 0) return 0;
+    if (!ble_ready || !g_bleConnected || ble_tx_char == NULL) return 0;
+
+    // MTU 247 → 有效载荷 244，按 180 分片以兼容没协商 MTU 的手机
+    const size_t chunk_max = 180;
+    size_t sent = 0;
+    while (sent < len) {
+        size_t chunk = len - sent;
+        if (chunk > chunk_max) chunk = chunk_max;
+        ble_tx_char->setValue((uint8_t*)(data + sent), chunk);
+        ble_tx_char->notify();
+        sent += chunk;
+        vTaskDelay(pdMS_TO_TICKS(8));        // 给协议栈一点时间把包发出去
+    }
+    tx_total += (uint32_t)sent;
+    // 不回显到接收区：接收框只显示从对端收到的数据
+    return sent;
+}
+
+// 清空接收区
+extern "C" void ui_ble_on_clear_requested(void)
+{
+    portENTER_CRITICAL(&rx_disp_mux);
+    rx_disp_len = 0;
+    rx_disp[0] = '\0';
+    rx_dirty = false;
+    portEXIT_CRITICAL(&rx_disp_mux);
+    g_bleRxPending = true;
+    g_bleRxTotal = 0;
+    Serial.println("[BLE] rx buffer cleared");
+}
+
+// 发送框 / 键盘的 √ → 发送
+extern "C" void ui_ble_on_send_requested(void)
+{
+    if (ui_ble_send_ta == NULL) return;
+    const char* text = lv_textarea_get_text(ui_ble_send_ta);
+    if (text == NULL || *text == '\0') return;
+
+    if (!bleuart_is_ready()) {
+        lv_label_set_text(ui_ble_status_label, "BLE not initialized");
+        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(UIK_C_ERR_TEXT), LV_STATE_DEFAULT);
+        return;
+    }
+    if (!bleuart_is_connected()) {
+        lv_label_set_text(ui_ble_status_label, "Not connected - pair first");
+        lv_obj_set_style_text_color(ui_ble_status_label, lv_color_hex(UIK_C_ERR_TEXT), LV_STATE_DEFAULT);
+        return;
+    }
+
+    // 末尾补一个换行，跟串口助手的习惯一致
+    String payload = String(text);
+    payload += "\r\n";
+    size_t sent = bleuart_send(payload.c_str(), payload.length());
+    Serial.printf("[BLE] sent %u bytes\n", (unsigned)sent);
+
+    lv_textarea_set_text(ui_ble_send_ta, "");
+    g_bleRxPending = true;
+}
+
+// 每帧任务（core0，LVGL 任务）
+void bleuart_ui_service(void)
+{
+    static bool     last_connected = false;
+    static uint32_t last_status_ms = 0;
+    static bool     last_ready     = false;
+
+    if (g_bleRxPending) {
+        g_bleRxPending = false;
+        ui_ble_refresh_rx();
+    }
+
+    uint32_t now = millis();
+    if (g_bleConnected != last_connected || ble_ready != last_ready ||
+        (now - last_status_ms) > 1000) {
+        last_connected = g_bleConnected;
+        last_ready     = ble_ready;
+        last_status_ms = now;
+        ui_ble_set_status();
+    }
+}
+
+#endif  // ENABLE_BLE

@@ -5,7 +5,7 @@
 //      0..39    标题条：左边 "ESP32-S3" 20pt，右边 "LVGL 8.3.6" 10pt 弱化
 //      40       1px 分隔线
 //      44..236  ★ 可滚动菜单容器：行高 35、行距 4，右侧 6px 滚动条槽。
-//               菜单条目已超过一屏（8 行 = 308px > 183px），拖动滚动，
+//               菜单条目已超过一屏（9 行 = 347px > 183px），拖动滚动，
 //               滚动条只在滚动时出现（AUTO）。第 5 行被下沿裁掉一截，
 //               这本身就是"还能往下滚"的视觉提示。
 //      236..240 底部留白
@@ -28,6 +28,7 @@
 #include "ui_relay.h"    // ui_relay / ui_relay_screen_init
 #include "ui_led.h"      // ui_led / ui_led_screen_init
 #include "ui_rfmon.h"    // ui_rfmon / ui_rfmon_screen_init
+#include "ui_nrf.h"      // ui_nrf / ui_nrf_screen_init
 #if ENABLE_BLE
 #include "ui_ble.h"      // ui_ble / ble_set_prev_screen
 #endif
@@ -52,6 +53,8 @@ static lv_obj_t * ui_ButtonLed = NULL;    // LED Strip（WS2812 / GPIO39）
 static lv_obj_t * ui_LabelLed = NULL;
 static lv_obj_t * ui_ButtonRfmon = NULL;  // RF Monitor（802.11 被动监听）
 static lv_obj_t * ui_LabelRfmon = NULL;
+static lv_obj_t * ui_ButtonNrf = NULL;    // nRF24（2.4G 私有协议被动嗅探）
+static lv_obj_t * ui_LabelNrf = NULL;
 static lv_obj_t * menu_cont = NULL;       // 可滚动菜单容器
 
 // ---- 菜单行的点击处理（统一用无动画切换，视觉上更干净）--------------------
@@ -91,6 +94,11 @@ static void go_rfmon_cb(lv_event_t * e)
     (void)e;
     _ui_screen_change(&ui_rfmon, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_rfmon_screen_init);
 }
+static void go_nrf_cb(lv_event_t * e)
+{
+    (void)e;
+    _ui_screen_change(&ui_nrf, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_nrf_screen_init);
+}
 
 // 注意：本文件按 C 编译，**不能用 lambda**，回调必须是普通静态函数
 #if ENABLE_BLE
@@ -106,11 +114,11 @@ static void go_ble_cb(lv_event_t * e)
 
 // ---- 菜单几何 --------------------------------------------------------------
 // 标题条 40 + 分隔线 1 + 一个缝隙 3 = 44 起；容器高 183，到 227 为止。
-// 行高恢复标准 UIK_ROW_H(35)，行距 4：8 行内容高 = 8*35 + 7*4 = 308 > 183，滚动。
+// 行高恢复标准 UIK_ROW_H(35)，行距 4：9 行内容高 = 9*35 + 8*4 = 347 > 183，滚动。
 // ★ 183 不是随手取的：183 = 4*39 + 27，第 5 行（Bluetooth）刚好被下沿裁掉
 //   8px —— "被切了一半的行"就是最直白的"下面还有，可以滚"提示。
 //   若容器高取 192，前 5 行会【完整】放下（4*39+35=191≤192），屏幕上没有任何
-//   滚动线索，用户根本不知道后面还有几行（Relay / LED / RF Monitor 全被藏没）。
+//   滚动线索，用户根本不知道后面还有几行（Relay / LED / RF Monitor / nRF24 全被藏没）。
 #define MENU_X      UIK_PANEL_GAP                    // 4（= 左右边距）
 #define TITLEBAR_H  40                               // 标题条高度
 #define MENU_Y0     (TITLEBAR_H + UIK_PANEL_GAP)     // 44
@@ -229,6 +237,14 @@ void ui_Screen1_screen_init(void)
                                        UIK_ACCENT_MON, UIK_C_SURFACE,
                                        go_rfmon_cb, NULL, &ui_LabelRfmon);
 
+    // nRF24 —— USB 符号（0xF287，已验证在 16pt 符号集里），橄榄金身份色。
+    // 被动嗅探外挂 nRF24L01+ 的 2.4G 私有协议流量（只收不发）。
+    // 接线 CE14 CSN15 SCK16 MISO17 MOSI18，见 src/nrf24.h。
+    ui_ButtonNrf = uik_menu_row_icon(menu_cont, 0, 0, MENU_ROW_W, UIK_ROW_H,
+                                     LV_SYMBOL_USB, "nRF24 Sniffer",
+                                     UIK_ACCENT_NRF, UIK_C_SURFACE,
+                                     go_nrf_cb, NULL, &ui_LabelNrf);
+
     uic_Screen1 = ui_Screen1;
 }
 
@@ -255,5 +271,7 @@ void ui_Screen1_screen_destroy(void)
     ui_LabelLed = NULL;
     ui_ButtonRfmon = NULL;
     ui_LabelRfmon = NULL;
+    ui_ButtonNrf = NULL;
+    ui_LabelNrf = NULL;
     menu_cont = NULL;
 }
