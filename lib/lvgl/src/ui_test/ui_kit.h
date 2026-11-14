@@ -58,15 +58,16 @@ extern "C" {
 #define UIK_C_ERR_TEXT   0xE88383
 
 // ---------------- 功能入口的身份色 ----------------
-#define UIK_ACCENT_TEMP    0xE8924A   // 温湿度：琥珀
-#define UIK_ACCENT_FILE    0x43C6B0   // 文件：青绿
-#define UIK_ACCENT_SERIAL  0x8CC461   // 串口：黄绿
-#define UIK_ACCENT_WIFI    0x3498db   // WiFi：蓝
-#define UIK_ACCENT_BLE     0x9B7CF5   // 蓝牙：靛紫
-#define UIK_ACCENT_HUM     0x4FC3D9   // 湿度：浅青
-#define UIK_ACCENT_CHIP    0xE07A7A   // 片内温度：暖红
-#define UIK_ACCENT_MON     0xD65DB1   // RF Monitor：品红
-#define UIK_ACCENT_NRF     0x81198f   // rfmon-nrf：深紫
+#define UIK_ACCENT_TEMP    0xD4845C   // 温湿度：土橙
+#define UIK_ACCENT_FILE    0x48988C   // 文件：灰松石
+#define UIK_ACCENT_SERIAL  0x86A85F   // 串口：灰草绿
+#define UIK_ACCENT_WIFI    0x497FA8   // WiFi：灰蓝
+#define UIK_ACCENT_BLE     0x746299   // 蓝牙：灰紫
+#define UIK_ACCENT_HUM     0x5898A3   // 湿度：灰冰青
+#define UIK_ACCENT_CHIP    0xB85C5C   // 片内温度：暗红
+#define UIK_ACCENT_MON     0xA84F78   // RF Monitor：灰玫红
+#define UIK_ACCENT_NRF     0x633974   // rfmon-nrf：暗灰紫
+
 
 // ---------------- 字体 ----------------
 LV_FONT_DECLARE(ui_font_cjk12)
