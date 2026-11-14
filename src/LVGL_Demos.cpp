@@ -171,11 +171,7 @@ static void label_set_text_if_changed(lv_obj_t* lbl, const char* text) {
     lv_label_set_text(lbl, text);
 }
 
-// lv_obj_set_style_text_color() 走的是 lv_obj_refresh_style()，
-// 而它内部会 invalidate **两次**。同样需要"值没变就不写"。
-// 比较时两边都过一遍 lv_color_to32：屏幕是 16 位色深(5-6-5)，
-// 直接拿 24 位的 0xRRGGBB 和取出来的值比会因为量化误差永远不相等，
-// 于是每次都会写一次样式 —— 等于没起到去抖的作用。
+
 static void label_set_color_if_changed(lv_obj_t* lbl, uint32_t rgb) {
     if (lbl == NULL) return;
     lv_color_t cur = lv_obj_get_style_text_color(lbl, LV_PART_MAIN);
