@@ -825,7 +825,7 @@ static String read_text_file(const char* path, size_t max_bytes, bool* truncated
         size_t want = (remaining > sizeof(buf)) ? sizeof(buf) : remaining;
         size_t got  = file.read(buf, want);
         if (got == 0) break;
-        content.concat((const char*)buf, got);   // 按块拼接，避免逐字节 +=
+        content.concat((const char*)buf, got);  
         remaining -= got;
     }
     file.close();
