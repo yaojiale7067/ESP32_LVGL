@@ -1798,7 +1798,7 @@ bool ui_relay_get_hw_state(void) {
 
 
  #define WS2812_PIN        48    //这是板载ws2812
-//#define WS2812_PIN        39
+//#define _PIN        39
 #define WS2812_RMT_CH     RMT_CHANNEL_1      // 通道 0 留空，避免和潜在外设撞车
 #define WS2812_MAX_LEDS   UI_LED_COUNT_MAX   // 120
 #define WS2812_CLK_DIV    2                  // 80MHz/2 -> 25ns/tick

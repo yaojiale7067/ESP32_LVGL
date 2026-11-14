@@ -11,7 +11,7 @@
 extern void original_setup();
 extern void original_loop();
 
-// 无 /wifi.cfg 时的兜底 WiFi（明文凭据，正式产品请移除）
+
 #define FIXED_SSID     "ChinaNet-qMyM"
 #define FIXED_PASSWORD "4r9mec6e"
 
@@ -55,19 +55,7 @@ void SD_Task(void* pvParameters) {
 #if ENABLE_BLE
 
 void BLE_Task(void* pvParameters) {
-    (void)pvParameters;
-    // ★ 必须先等 WiFi 完成 esp_wifi_init！
-    //   实测日志（复现"WiFi 一直重连"）：
-    //     [BLE] init as "ESP32S3-BLE-UART" ...          <- 3.3s，Bluedroid 先吃内部堆
-    //     E wifi: Expected to init 4 rx buffer, actual is 3
-    //     E wifi_init: Failed to deinit Wi-Fi driver (0x3001)
-    //     [WiFiGeneric] esp_wifi_init 257                <- 257 = ESP_ERR_NO_MEM
-    //     [WiFiSTA] begin(): STA enable failed!
-    //   原因：esp_wifi_init 要申请 4 块连续的 RX 静态缓冲（内部 DMA 区），
-    //   Bluedroid 一次吃掉三十多 KB 内部堆后就申请不到了，于是 WiFi 永远起不来，
-    //   WiFi_Task 每 10s 打印一次 Reconnecting。
-    //   内部 RAM 是 WiFi/BLE 共用的稀缺资源（8MB PSRAM 帮不上，协议栈只在内部 RAM）。
-    //   等 WiFi 初始化完成后再起 BLE，两边各得其所；最多多等 3s，开机无感。
+
     while (!g_wifiInitDone) vTaskDelay(pdMS_TO_TICKS(100));
 
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -80,13 +68,6 @@ void BLE_Task(void* pvParameters) {
 }
 #endif
 
-// 注意：所有 SD 访问都必须走 SD_LOCK()，否则 core0/core1 会同时操作 HSPI
-
-// ---------------------------------------------------------------------------
-//  把一个 AP 插入 aps[]（按 RSSI 降序的定长窗口，容量 APP_CSCAN_MAX_AP）。
-//  满了就只保留更强的，最弱的那个被挤掉 —— 详情列表要显示的是"信号最好的那些"。
-//  ★ 这里只做展示截断；ap_per_ch[] 的计数是全量的，不受这个窗口影响。
-// ---------------------------------------------------------------------------
 static void cscan_insert_ap(ChanScanResult_t* r, const char* ssid, int32_t rssi,
                             uint8_t ch, uint8_t enc)
 {
