@@ -42,10 +42,6 @@
 #define DHTTYPE DHT11
 #define SD_CS   4
 
-// 继电器：GPIO41。★ 高电平触发（ON = 引脚拉高吸合）。
-// 若换的是低电平触发的模块（很多蓝色小板 IN 拉低才吸合），
-// 把 RELAY_ACTIVE_LEVEL 改成 LOW 即可，其余逻辑不动。
-// GPIO41 在本工程没有其它用途：TFT 用 8..13，SD_CS=4，DHT=7，触摸 I2C=1/2、RST=42。
 #define RELAY_PIN            41
 #define RELAY_ACTIVE_LEVEL   HIGH
 
@@ -1841,7 +1837,7 @@ struct LedState {
     bool    dirty;      // 下个 tick 需要写灯
     bool    rmt_ok;
 };
-static LedState led = { 200, 190, 40, 1, 0.0f, true, false };
+static LedState led = { 200, 10, 40, 1, 0.0f, true, false };
 
 // 样本字节 -> RMT 波形。RMT 中断里调用，必须 IRAM_ATTR。
 static void IRAM_ATTR ws2812_rmt_adapter(const void* src, rmt_item32_t* dest,
