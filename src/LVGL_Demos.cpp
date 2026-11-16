@@ -42,6 +42,10 @@
 #define DHTTYPE DHT11
 #define SD_CS   4
 
+// 继电器：GPIO41。★ 高电平触发（ON = 引脚拉高吸合）。
+// 若换的是低电平触发的模块（很多蓝色小板 IN 拉低才吸合），
+// 把 RELAY_ACTIVE_LEVEL 改成 LOW 即可，其余逻辑不动。
+// GPIO41 在本工程没有其它用途：TFT 用 8..13，SD_CS=4，DHT=7，触摸 I2C=1/2、RST=42。
 #define RELAY_PIN            41
 #define RELAY_ACTIVE_LEVEL   HIGH
 
@@ -171,7 +175,11 @@ static void label_set_text_if_changed(lv_obj_t* lbl, const char* text) {
     lv_label_set_text(lbl, text);
 }
 
-
+// lv_obj_set_style_text_color() 走的是 lv_obj_refresh_style()，
+// 而它内部会 invalidate **两次**。同样需要"值没变就不写"。
+// 比较时两边都过一遍 lv_color_to32：屏幕是 16 位色深(5-6-5)，
+// 直接拿 24 位的 0xRRGGBB 和取出来的值比会因为量化误差永远不相等，
+// 于是每次都会写一次样式 —— 等于没起到去抖的作用。
 static void label_set_color_if_changed(lv_obj_t* lbl, uint32_t rgb) {
     if (lbl == NULL) return;
     lv_color_t cur = lv_obj_get_style_text_color(lbl, LV_PART_MAIN);
@@ -817,7 +825,7 @@ static String read_text_file(const char* path, size_t max_bytes, bool* truncated
         size_t want = (remaining > sizeof(buf)) ? sizeof(buf) : remaining;
         size_t got  = file.read(buf, want);
         if (got == 0) break;
-        content.concat((const char*)buf, got);  
+        content.concat((const char*)buf, got);   // 按块拼接，避免逐字节 +=
         remaining -= got;
     }
     file.close();
@@ -1653,12 +1661,6 @@ void wscan_poll() {
         return;
     }
 
-    // ★ 先收进栈上的临时副本，只有成功才覆盖 wscan_last：
-    //   扫描失败时 WiFi_Task 送回来的是一份全零结果，直接收进 wscan_last
-    //   会把上一次的好数据抹掉 —— 柱子还画着旧值（失败分支提前 return 没重画），
-    //   详情却已经变空，两边对不上。1202B 的栈帧和 wifi_scan_poll() 里那个
-    //   1654B 的 ScanResultMsg_t 同量级，LVGL_Task 栈 16010 够用，
-    //   而且这两个 poll 是从 original_loop() 顺序调用的，帧不会同时存在。
     ChanScanResult_t rx;
     if (xQueueReceive(wifiChanScanResQueue, &rx, 0) != pdTRUE) return;   // 还没到
     wscan_state = WSCAN_IDLE;
@@ -1751,18 +1753,6 @@ void ui_wscan_on_screen_ready(void) {
 
 } /* extern "C" */
 
-
-// ============================================================================
-//  继电器控制（GPIO41，屏体在 ui_test/screens/ui_relay.c）
-//  ----------------------------------------------------------------------------
-//  ★ 状态缓存 relay_hw_on 是"软件视角的真相"：GPIO41 是纯输出，
-//    digitalRead 读回的是引脚电平不是继电器是否真的吸合，
-//    所以维护一个自己的 bool，写引脚和更新缓存必须在同一个函数里完成，
-//    界面同步（ui_relay_set_state）只信这个缓存。
-//  ★ 上电默认 OFF：继电器控制的是实体设备，复位/重启后不应该
-//    "恢复到上次状态"——没人知道上次是什么、设备现在受不受得了。
-//    要记忆状态的话应该显式存 SD，目前不做。
-// ============================================================================
 static bool relay_hw_on = false;
 
 static void relay_hw_init() {
@@ -1794,7 +1784,7 @@ bool ui_relay_get_hw_state(void) {
 
 
  #define WS2812_PIN        48    //这是板载ws2812
-//#define _PIN        39
+// #define WS2812_PIN        39
 #define WS2812_RMT_CH     RMT_CHANNEL_1      // 通道 0 留空，避免和潜在外设撞车
 #define WS2812_MAX_LEDS   UI_LED_COUNT_MAX   // 120
 #define WS2812_CLK_DIV    2                  // 80MHz/2 -> 25ns/tick
@@ -1814,7 +1804,7 @@ struct LedState {
     bool    dirty;      // 下个 tick 需要写灯
     bool    rmt_ok;
 };
-static LedState led = { 200, 10, 40, 1, 0.0f, true, false };
+static LedState led = { 200, 5, 40, 1, 0.0f, true, false };
 
 // 样本字节 -> RMT 波形。RMT 中断里调用，必须 IRAM_ATTR。
 static void IRAM_ATTR ws2812_rmt_adapter(const void* src, rmt_item32_t* dest,
@@ -2024,12 +2014,14 @@ static int rfmon_fill_ap_entries(const rfmon_stats_t& st, ui_rfmon_entry_t* ent)
         const rfmon_ap_t& a = st.aps[best];
         char mac[18];
         rfmon_mac_str(a.bssid, mac);
+        // 前缀标记：!!=同名不同 BSSID（可能是中继，也可能是克隆）；*=开放同名（降级钓鱼）
+        const char* mark = a.twin ? "!! " : (a.sec == 0 ? "* " : "");
         if (a.ssid[0] != '\0') {
             const char* ven = rfmon_oui_vendor(a.bssid);
-            snprintf(ent[n].name, sizeof(ent[n].name), "%s%s%s", a.ssid,
+            snprintf(ent[n].name, sizeof(ent[n].name), "%s%s%s%s", mark, a.ssid,
                      (ven[0] != '?') ? " " : "", (ven[0] != '?') ? ven : "");
         } else {
-            snprintf(ent[n].name, sizeof(ent[n].name), "<hidden> %s", mac);
+            snprintf(ent[n].name, sizeof(ent[n].name), "%s<hidden> %s", mark, mac);
         }
         snprintf(ent[n].right, sizeof(ent[n].right), "CH%d x%u",
                  (int)a.ch, (unsigned)a.beacons);
@@ -2061,9 +2053,19 @@ static void rfmon_poll_ui() {
     } else {
         n = rfmon_fill_ap_entries(st, ent);
         char hdr[48];
-        snprintf(hdr, sizeof(hdr), "BEACONS SEEN " LV_SYMBOL_BULLET " %u AP",
-                 (unsigned)st.ap_count);
-        ui_rfmon_set_header(hdr, UIK_C_TEXT_DIM);
+        if (st.open_downgrade > 0) {
+            snprintf(hdr, sizeof(hdr), "OPEN TWIN " LV_SYMBOL_WARNING " %u SUSPECT",
+                     (unsigned)st.open_downgrade);
+            ui_rfmon_set_header(hdr, UIK_C_ERR_TEXT);
+        } else if (st.twin_count > 0) {
+            snprintf(hdr, sizeof(hdr), "DUPLICATE SSID " LV_SYMBOL_BULLET " %u AP",
+                     (unsigned)st.twin_count);
+            ui_rfmon_set_header(hdr, UIK_C_WARN_TEXT);
+        } else {
+            snprintf(hdr, sizeof(hdr), "BEACONS SEEN " LV_SYMBOL_BULLET " %u AP",
+                     (unsigned)st.ap_count);
+            ui_rfmon_set_header(hdr, UIK_C_TEXT_DIM);
+        }
     }
     ui_rfmon_set_list(st.version, deauth_mode, n, ent);
 
@@ -2105,12 +2107,20 @@ static void rfmon_serial_dump() {
         for (int i = 0; i < RFMON_MAX_AP; i++) {
             if (st.aps[i].beacons == 0) continue;
             char mac[18]; rfmon_mac_str(st.aps[i].bssid, mac);
-            Serial.printf("  CH%-2d %4ddBm %s %-9s %s x%u\n",
+            static const char* secname[3] = { "OPEN", "WEP", "WPA" };
+            Serial.printf("  CH%-2d %4ddBm %s %-9s %-5s %s%s x%u\n",
                           (int)st.aps[i].ch, (int)st.aps[i].rssi, mac,
                           rfmon_oui_vendor(st.aps[i].bssid),
+                          secname[st.aps[i].sec > 2 ? 2 : st.aps[i].sec],
+                          st.aps[i].twin ? "[TWIN] " : "",
                           st.aps[i].ssid[0] ? st.aps[i].ssid : "<hidden>",
                           (unsigned)st.aps[i].beacons);
         }
+    }
+    if (st.twin_count || st.open_downgrade) {
+        Serial.printf("!! duplicate SSID: %u AP, open-twin suspects: %u\n",
+                      (unsigned)st.twin_count, (unsigned)st.open_downgrade);
+        Serial.println("   (same SSID on different BSSIDs; mesh/repeaters also do this)");
     }
     Serial.println("==========================\n");
 }

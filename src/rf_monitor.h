@@ -32,6 +32,8 @@ typedef struct {
     uint8_t  ch;
     int8_t   rssi;
     uint16_t beacons;
+    uint8_t  sec;                   // 0=开放 1=WEP 2=WPA/WPA2/WPA3（看 RSN/WPA IE）
+    bool     twin;                  // 同名 SSID 但 BSSID 不同 → 疑似克隆/钓鱼
 } rfmon_ap_t;
 
 typedef struct {
@@ -49,6 +51,8 @@ typedef struct {
     uint32_t disassoc;
     uint8_t  ap_count;
     uint8_t  deauth_src_count;
+    uint8_t  twin_count;            // twin==true 的 AP 数量（同名不同 BSSID）
+    uint8_t  open_downgrade;        // 与加密 AP 同名、但自己是开放的（降级钓鱼）
     rfmon_ap_t aps[RFMON_MAX_AP];
     rfmon_deauth_src_t deauth_srcs[RFMON_MAX_DEAUTH_SRC];
 } rfmon_stats_t;                    // ≈ 790B

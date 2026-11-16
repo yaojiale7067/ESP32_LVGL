@@ -22,6 +22,7 @@
 // ============================================================================
 
 #include <Arduino.h>
+#include <string.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
@@ -191,6 +192,8 @@ static void IRAM_ATTR rfmon_rx_cb(void * buf, wifi_promiscuous_pkt_type_t type)
         // 提取 SSID（tag 0）。beacon/probe-resp 的固定参数 12B，tags 从 36 起。
         char ssid[33];
         int  ssid_len = 0;
+        uint8_t sec = 0;                        // 0=open 1=WEP 2=WPA 系列
+        if (len >= 35 && (f[34] & 0x10)) sec = 1;   // capability 的 Privacy 位
         uint32_t off = 36;
         while (off + 2 <= len) {
             uint8_t id = f[off], tl = f[off + 1];
@@ -198,7 +201,14 @@ static void IRAM_ATTR rfmon_rx_cb(void * buf, wifi_promiscuous_pkt_type_t type)
             if (id == 0) {
                 ssid_len = (tl > 32) ? 32 : (int)tl;
                 for (int j = 0; j < ssid_len; j++) ssid[j] = (char)f[off + 2 + j];
-                break;
+            }
+            else if (id == 48) {                // RSN IE → WPA2/WPA3
+                sec = 2;
+            }
+            else if (id == 221 && tl >= 4 &&    // 厂商 IE 00:50:F2 type 1 → WPA1
+                     f[off + 2] == 0x00 && f[off + 3] == 0x50 &&
+                     f[off + 4] == 0xF2 && f[off + 5] == 0x01) {
+                sec = 2;
             }
             off += 2u + tl;
         }
@@ -211,6 +221,7 @@ static void IRAM_ATTR rfmon_rx_cb(void * buf, wifi_promiscuous_pkt_type_t type)
             if (s_stats.aps[idx].beacons < 0xFFFF) s_stats.aps[idx].beacons++;
             s_stats.aps[idx].rssi = rssi;
             s_stats.aps[idx].ch   = ch;
+            if (sec > s_stats.aps[idx].sec) s_stats.aps[idx].sec = sec;
             // 之前只抓到过隐藏信标、这次带出 SSID 了（probe resp 常见）→ 补上
             if (s_stats.aps[idx].ssid[0] == '\0' && ssid_len > 0) {
                 for (int j = 0; j <= ssid_len; j++) s_stats.aps[idx].ssid[j] = ssid[j];
@@ -224,6 +235,7 @@ static void IRAM_ATTR rfmon_rx_cb(void * buf, wifi_promiscuous_pkt_type_t type)
                 s_stats.aps[idx].ch      = ch;
                 s_stats.aps[idx].rssi    = rssi;
                 s_stats.aps[idx].beacons = 1;
+                s_stats.aps[idx].sec     = sec;
                 s_stats.ap_count = (uint8_t)(idx + 1);
                 s_stats.version++;
             }
@@ -343,10 +355,37 @@ bool rfmon_is_active(void)
     return g_rfmonActive;
 }
 
+// ---------------------------------------------------------------------------
+//  同名 AP 分析：只读快照，不在中断上下文算（16 条表两两比对，微秒级）
+//  twin          = 两个不同 BSSID 广播同一个 SSID（正常 Mesh/中继也可能，只是"值得看"）
+//  open_downgrade= 加密 AP 的 SSID 同时也被一个开放 AP 广播（典型钓鱼诱导）
+// ---------------------------------------------------------------------------
+static void rfmon_analyze_ssids(rfmon_stats_t * st)
+{
+    st->twin_count = 0;
+    st->open_downgrade = 0;
+    for (int i = 0; i < RFMON_MAX_AP; i++) {
+        st->aps[i].twin = false;
+        if (st->aps[i].beacons == 0 || st->aps[i].ssid[0] == '\0') continue;
+        for (int j = 0; j < RFMON_MAX_AP; j++) {
+            if (i == j || st->aps[j].beacons == 0) continue;
+            if (strcmp(st->aps[i].ssid, st->aps[j].ssid) != 0) continue;
+            bool same_bssid = true;
+            for (int k = 0; k < 6; k++)
+                if (st->aps[i].bssid[k] != st->aps[j].bssid[k]) { same_bssid = false; break; }
+            if (same_bssid) continue;
+            st->aps[i].twin = true;
+            if (st->aps[i].sec == 0 && st->aps[j].sec != 0) st->open_downgrade++;
+        }
+        if (st->aps[i].twin) st->twin_count++;
+    }
+}
+
 void rfmon_get_stats(rfmon_stats_t * out)
 {
     if (out == NULL) return;
     portENTER_CRITICAL(&s_mux);
     memcpy(out, &s_stats, sizeof(*out));     // ≈790B，微秒级
     portEXIT_CRITICAL(&s_mux);
+    rfmon_analyze_ssids(out);
 }
