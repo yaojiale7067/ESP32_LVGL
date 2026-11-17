@@ -22,6 +22,7 @@
 #define REG_RF_CH       0x05
 #define REG_RF_SETUP    0x06
 #define REG_STATUS      0x07
+#define REG_RPD         0x09
 #define REG_RX_ADDR_P0  0x0A
 #define REG_RX_PW_P0    0x11
 #define CMD_R_REGISTER  0x00
@@ -44,6 +45,69 @@ static TaskHandle_t  s_task = NULL;
 static volatile bool s_active = false;
 static bool          s_hw_ok = false;
 static int           s_fixed_ch = -1;      // <0 = 跳频
+
+// 扫描窗口 / 停留 / 速率档：运行中可改，跳频任务每圈重新读取
+static volatile uint8_t  s_min_ch    = NRF_CH_MIN;
+static volatile uint8_t  s_max_ch    = NRF_CH_MAX;
+static volatile uint16_t s_dwell_ms  = NRF_DWELL_MS;
+static volatile uint8_t  s_rate_mode = NRF_RATE_ALL;
+
+const char * nrf_rate_name(uint8_t rate) {
+    return kRateName[rate > 2 ? 2 : rate];
+}
+
+bool nrf_set_range(uint8_t min_ch, uint8_t max_ch) {
+    if (min_ch > max_ch || max_ch > NRF_CH_MAX) return false;
+    s_min_ch = min_ch;
+    s_max_ch = max_ch;
+    portENTER_CRITICAL(&s_mux);
+    s_stats.min_ch = min_ch;
+    s_stats.max_ch = max_ch;
+    portEXIT_CRITICAL(&s_mux);
+    return true;
+}
+
+bool nrf_set_dwell(uint16_t ms) {
+    if (ms < 5 || ms > 2000) return false;
+    s_dwell_ms = ms;
+    portENTER_CRITICAL(&s_mux);
+    s_stats.dwell_ms = ms;
+    portEXIT_CRITICAL(&s_mux);
+    return true;
+}
+
+void nrf_set_rate_mode(uint8_t mode) {
+    if (mode > NRF_RATE_ALL) mode = NRF_RATE_ALL;
+    s_rate_mode = mode;
+    portENTER_CRITICAL(&s_mux);
+    s_stats.rate_mode = mode;
+    portEXIT_CRITICAL(&s_mux);
+}
+
+void nrf_get_config(uint8_t * min_ch, uint8_t * max_ch, uint16_t * dwell_ms, uint8_t * rate_mode) {
+    if (min_ch)    *min_ch = s_min_ch;
+    if (max_ch)    *max_ch = s_max_ch;
+    if (dwell_ms)  *dwell_ms = s_dwell_ms;
+    if (rate_mode) *rate_mode = s_rate_mode;
+}
+
+// ---------------- 频谱数据（RPD 采样）----------------
+// nRF24L01+ 没有 RSSI 寄存器，只有 RPD（Received Power Detector）一位：
+// 接收时若检测到 > -64dBm 的信号它就置 1。所以这里把它当"有/无能量"采样，
+// 在每个信道停留期间按 1ms 打点，命中率 ×255 就是该信道的活动度（0..255），
+// 和 SDR 频谱图里的功率色阶是一个意思（只是二值量化的）。
+static uint8_t  s_act[NRF_CH_NUM];       // 上一轮完成的活动度
+static uint8_t  s_act_live[NRF_CH_NUM];  // 本轮已扫到的部分
+static uint32_t s_pass_seq = 0;          // 每完成一轮 +1
+
+void nrf_get_spectrum(uint8_t * out, uint8_t * live, uint32_t * pass_seq, uint8_t * cur_ch) {
+    portENTER_CRITICAL(&s_mux);
+    if (out)      memcpy(out, s_act, NRF_CH_NUM);
+    if (live)     memcpy(live, s_act_live, NRF_CH_NUM);
+    if (pass_seq) *pass_seq = s_pass_seq;
+    if (cur_ch)   *cur_ch = s_stats.channel;
+    portEXIT_CRITICAL(&s_mux);
+}
 
 static bool pins_configured(void) {
     return NRF_PIN_CE >= 0 && NRF_PIN_CSN >= 0 && NRF_PIN_SCK >= 0 &&
@@ -145,6 +209,10 @@ bool nrf_sniffer_init(void) {
     s_stats.available = true;
     s_stats.version = 1;
     s_stats.next_seq = 1;
+    s_stats.min_ch = s_min_ch;
+    s_stats.max_ch = s_max_ch;
+    s_stats.dwell_ms = s_dwell_ms;
+    s_stats.rate_mode = s_rate_mode;
     portEXIT_CRITICAL(&s_mux);
 
     Serial.println("[nrf] nRF24L01+ handshake OK, promiscuous RX ready (passive, no TX)");
@@ -173,8 +241,8 @@ static void nrf_store_packet(uint8_t ch, uint8_t rate, const uint8_t * data, uin
 // ---------------- 主循环任务 ----------------
 static void nrf_task(void * arg) {
     (void)arg;
-    uint8_t ch = (s_fixed_ch >= 0) ? (uint8_t)s_fixed_ch : NRF_CH_MIN;
-    uint8_t rate_idx = 0;
+    uint8_t ch = (s_fixed_ch >= 0) ? (uint8_t)s_fixed_ch : s_min_ch;
+    uint8_t rate_idx = (s_rate_mode == NRF_RATE_ALL) ? 0 : (uint8_t)s_rate_mode;
     nrf_set_rate(rate_idx);
     nrf_set_channel(ch);
     digitalWrite(NRF_PIN_CE, HIGH);          // 进 RX
@@ -182,7 +250,12 @@ static void nrf_task(void * arg) {
     nrf_flush_rx();
 
     uint32_t dwell_start = millis();
+    uint16_t act_hits = 0, act_samples = 0;   // 当前信道的 RPD 命中/采样数
     while (s_active) {
+        // RPD 采样：接收状态下读到 1 表示此刻有 > -64dBm 的能量
+        if ((nrf_read_reg(REG_RPD) & 0x01) != 0) act_hits++;
+        act_samples++;
+
         uint8_t status = nrf_read_reg(REG_STATUS);
         // RX FIFO 非空：pipe 号 3..7 表示空（nRF24L01+ 数据手册）
         if ((status & STATUS_RX_DR) || ((status & STATUS_RX_P_NO) <= 5)) {
@@ -198,15 +271,30 @@ static void nrf_task(void * arg) {
             nrf_flush_rx();                            // 丢掉可能残留的后续包
         }
 
-        // 跳频模式下到点换信道/速率
-        if (s_fixed_ch < 0 && millis() - dwell_start >= NRF_DWELL_MS) {
+        // 跳频模式下到点换信道/速率（窗口和停留时间每圈重读，运行中可改）
+        if (s_fixed_ch < 0 && (millis() - dwell_start) >= s_dwell_ms) {
             dwell_start = millis();
+
+            // 本信道活动度入库（0..255），供频谱图取用
+            uint8_t lvl = (act_samples > 0)
+                        ? (uint8_t)((uint32_t)act_hits * 255u / act_samples) : 0;
+            act_hits = act_samples = 0;
+            portENTER_CRITICAL(&s_mux);
+            if (ch < NRF_CH_NUM) s_act_live[ch] = lvl;
+            portEXIT_CRITICAL(&s_mux);
+
             ch++;
-            if (ch > NRF_CH_MAX) {
-                ch = NRF_CH_MIN;
-                rate_idx = (rate_idx + 1) & 0x03;      // 扫完一圈换速率
-                if (rate_idx > 2) rate_idx = 0;
-                nrf_set_rate(rate_idx);
+            if (ch > s_max_ch || ch < s_min_ch) {
+                ch = s_min_ch;
+                // 一轮扫完：把 live 提升为 out，通知 UI 可以翻新一列
+                portENTER_CRITICAL(&s_mux);
+                memcpy(s_act, s_act_live, sizeof(s_act));
+                s_pass_seq++;
+                portEXIT_CRITICAL(&s_mux);
+                if (s_rate_mode == NRF_RATE_ALL) {     // 扫完一圈换速率
+                    rate_idx = (uint8_t)((rate_idx + 1) % 3);
+                    nrf_set_rate(rate_idx);
+                }
             }
             nrf_set_channel(ch);
             nrf_flush_rx();
@@ -215,7 +303,7 @@ static void nrf_task(void * arg) {
             s_stats.rate_idx = rate_idx;
             portEXIT_CRITICAL(&s_mux);
         }
-        vTaskDelay(pdMS_TO_TICKS(4));                  // 4ms 轮询，让出 CPU
+        vTaskDelay(pdMS_TO_TICKS(1));                  // 1ms 轮询：dwell 5ms 时也不会漏掉切换点
     }
 
     digitalWrite(NRF_PIN_CE, LOW);                     // 退出 RX
@@ -231,8 +319,12 @@ void nrf_sniffer_start(int fixed_ch) {
     portENTER_CRITICAL(&s_mux);
     s_stats.active = true;
     s_stats.hopping = (fixed_ch < 0);
-    s_stats.channel = (fixed_ch >= 0) ? (uint8_t)fixed_ch : NRF_CH_MIN;
-    s_stats.rate_idx = 0;
+    s_stats.channel = (fixed_ch >= 0) ? (uint8_t)fixed_ch : s_min_ch;
+    s_stats.rate_idx = (s_rate_mode == NRF_RATE_ALL) ? 0 : (uint8_t)s_rate_mode;
+    s_stats.rate_mode = s_rate_mode;
+    s_stats.min_ch = s_min_ch;
+    s_stats.max_ch = s_max_ch;
+    s_stats.dwell_ms = s_dwell_ms;
     portEXIT_CRITICAL(&s_mux);
 
     s_active = true;
@@ -245,9 +337,13 @@ void nrf_sniffer_start(int fixed_ch) {
         return;
     }
     if (fixed_ch >= 0)
-        Serial.printf("[nrf] sniffing fixed CH%d\n", fixed_ch);
+        Serial.printf("[nrf] sniffing fixed CH%d %s\n", fixed_ch,
+                      (s_rate_mode == NRF_RATE_ALL) ? "(rates cycling)" : nrf_rate_name(s_rate_mode));
     else
-        Serial.printf("[nrf] sniffing CH%d..%d hopping, rates 1M/2M/250K\n", NRF_CH_MIN, NRF_CH_MAX);
+        Serial.printf("[nrf] sniffing CH%d..%d, dwell %ums, %s\n",
+                      (int)s_min_ch, (int)s_max_ch, (unsigned)s_dwell_ms,
+                      (s_rate_mode == NRF_RATE_ALL) ? "rates 1M/2M/250K cycling"
+                                                    : nrf_rate_name(s_rate_mode));
 }
 
 void nrf_sniffer_stop(void) {
@@ -269,7 +365,11 @@ void nrf_clear_stats(void) {
     s_stats.active = act;
     s_stats.version = 1;
     s_stats.next_seq = 1;
-    s_stats.channel = (s_fixed_ch >= 0) ? (uint8_t)s_fixed_ch : NRF_CH_MIN;
+    s_stats.channel = (s_fixed_ch >= 0) ? (uint8_t)s_fixed_ch : s_min_ch;
+    s_stats.rate_mode = s_rate_mode;
+    s_stats.min_ch = s_min_ch;
+    s_stats.max_ch = s_max_ch;
+    s_stats.dwell_ms = s_dwell_ms;
     portEXIT_CRITICAL(&s_mux);
 }
 

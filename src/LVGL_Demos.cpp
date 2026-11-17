@@ -8,7 +8,7 @@
 #include <FS.h>
 #include <SD.h>
 #include <SPI.h>
-#include <DHT.h>
+#include "dht11.h"
 #include <vector>
 #include <TJpg_Decoder.h>
 #include <demos/lv_demos.h>
@@ -39,7 +39,6 @@
 #endif
 
 #define DHTPIN  7
-#define DHTTYPE DHT11
 #define SD_CS   4
 
 // 继电器：GPIO41。★ 高电平触发（ON = 引脚拉高吸合）。
@@ -52,7 +51,6 @@
 // POSIX TZ 字符串的符号是反的："CST-8" 才是 UTC+8，写成 "CST+8" 会变成 UTC-8
 #define TZ_UTC8  "CST-8"
 
-DHT dht(DHTPIN, DHTTYPE);
 SPIClass sdSPI = SPIClass(HSPI);
 
 static String current_path = "/";
@@ -206,22 +204,32 @@ static bool is_txt_file(const String& filename) {
 }
 
 // DHT11 统一入口：限速 + 缓存
+#define DHT_FAIL_BACKOFF 20000UL   // 连续失败后改成 20s 才试一次
+
+static unsigned long dht_fail_streak = 0;
+
 static bool dht_read_cached(float* temp, float* humi, bool force) {
     unsigned long now = millis();
-    if (!force && last_dht_read_ms != 0 && (now - last_dht_read_ms) < DHT_MIN_INTERVAL) {
-        // 间隔不足：复用上一次成功的结果
+    // 连续读失败就降频（20s 一次），传感器没接时不白占 LVGL 的时间片
+    unsigned long interval = (dht_fail_streak >= 3) ? DHT_FAIL_BACKOFF : DHT_MIN_INTERVAL;
+    if (!force && last_dht_read_ms != 0 && (now - last_dht_read_ms) < interval) {
         if (isnan(last_dht_temp) || isnan(last_dht_humi)) return false;
         *temp = last_dht_temp;
         *humi = last_dht_humi;
         return true;
     }
     last_dht_read_ms = now;
-    float t = dht.readTemperature();
-    float h = dht.readHumidity();
-    if (isnan(t) || isnan(h)) {
-        // 只更新时间戳，保留上一次的有效值，避免一次抖动就显示 "--"
+
+    float t = NAN, h = NAN;
+    if (!dht11_read(&t, &h)) {
+        if (dht_fail_streak < 250) dht_fail_streak++;
+        if (dht_fail_streak == 1 || (dht_fail_streak % 40) == 0) {
+            Serial.printf("[dht] read failed x%u (GPIO%d no response / bad checksum)\n",
+                          (unsigned)dht_fail_streak, DHTPIN);
+        }
         return false;
     }
+    dht_fail_streak = 0;
     last_dht_temp = t;
     last_dht_humi = h;
     *temp = t;
@@ -2224,11 +2232,6 @@ static unsigned long nrf_last_poll = 0;
 static unsigned long nrf_last_log  = 0;
 static uint32_t      nrf_logged_seq = 0;   // 已落盘的最大 seq
 
-static const char* nrf_rate_name(uint8_t r) {
-    static const char* t[3] = { "1M", "2M", "250K" };
-    return t[r & 3];
-}
-
 static void nrf_poll_ui() {
     if (ui_nrf == NULL) return;
     if (millis() - nrf_last_poll < 500) return;
@@ -2265,8 +2268,9 @@ static void nrf_poll_ui() {
         snprintf(hdr, sizeof(hdr), "CAPTURED " LV_SYMBOL_BULLET " %u pkts",
                  (unsigned)st.packets);
         ui_nrf_set_header(hdr, st.packets > 0 ? UIK_C_OK_TEXT : UIK_C_TEXT_DIM);
-        snprintf(hdr, sizeof(hdr), "Sniffing CH%d %s" LV_SYMBOL_BULLET " RX only",
-                 (int)st.channel, st.hopping ? "hop" : "fix");
+        snprintf(hdr, sizeof(hdr), "CH%d/%d-%d %s " LV_SYMBOL_BULLET " RX only",
+                 (int)st.channel, (int)st.min_ch, (int)st.max_ch,
+                 (st.rate_mode == NRF_RATE_ALL) ? "all" : nrf_rate_name(st.rate_mode));
         ui_nrf_set_status(hdr, UIK_C_OK_TEXT);
     } else {
         snprintf(hdr, sizeof(hdr), "STOPPED " LV_SYMBOL_BULLET " %u pkts " LV_SYMBOL_BULLET " /nrf.csv",
@@ -2274,6 +2278,35 @@ static void nrf_poll_ui() {
         ui_nrf_set_header(hdr, UIK_C_TEXT_DIM);
         ui_nrf_set_status("Idle " LV_SYMBOL_BULLET " tap Scan to listen (passive)", UIK_C_TEXT_DIM);
     }
+}
+
+// 频谱视图：把 RPD 活动度喂给 nRF 屏的画布。
+// 一轮扫完（pass_seq 变化）就整屏左移一列；还在扫的时候用 live 数组
+// 把"正在填充"的那一列实时重画，看上去像频谱在一点点长出来。
+static unsigned long nrf_spec_last = 0;
+static uint32_t      nrf_spec_seq  = 0xFFFFFFFFu;
+
+static void nrf_spectrum_tick() {
+    if (!ui_nrf_spectrum_visible()) return;
+    if (millis() - nrf_spec_last < 150) return;      // 150ms 一帧，够"流动"又不抢总线
+    nrf_spec_last = millis();
+
+    uint8_t lo = 0, hi = NRF_CH_MAX, rate = 0;
+    uint16_t dw = 0;
+    nrf_get_config(&lo, &hi, &dw, &rate);
+
+    uint8_t  vals[NRF_CH_NUM];
+    uint32_t seq = 0;
+    nrf_get_spectrum(vals, NULL, &seq, NULL);
+
+    bool commit = false;
+    if (seq != nrf_spec_seq) {
+        nrf_spec_seq = seq;
+        commit = true;
+    } else {
+        nrf_get_spectrum(NULL, vals, NULL, NULL);    // 本轮进行中的部分结果
+    }
+    ui_nrf_spectrum_push(vals, lo, hi, commit);
 }
 
 // SD 落盘：/nrf.csv，按 seq 增量（每包一行，含全量 hex）
@@ -2322,6 +2355,11 @@ static void nrf_serial_dump() {
     }
     Serial.printf("packets=%u (logged up to seq=%u)\n",
                   (unsigned)st.packets, (unsigned)nrf_logged_seq);
+    Serial.printf("range CH%d..%d (%.0f..%.0fMHz), dwell %ums, rate %s\n",
+                  (int)st.min_ch, (int)st.max_ch, 2400.0 + st.min_ch, 2400.0 + st.max_ch,
+                  (unsigned)st.dwell_ms,
+                  (st.rate_mode == NRF_RATE_ALL) ? "cycling 1M/2M/250K"
+                                                 : nrf_rate_name(st.rate_mode));
     for (int i = 0; i < st.pkt_count; i++) {
         const nrf_pkt_t& p = st.pkts[i];
         Serial.printf("  #%u CH%d %s len=%u : ", (unsigned)p.seq, (int)p.ch,
@@ -2355,6 +2393,9 @@ void ui_nrf_on_toggle(void) {
 void ui_nrf_on_screen_ready(void) {
     nrf_last_poll = 0;
     nrf_poll_ui();
+    Serial.printf("[nrf] screen ready, spectrum canvas %s\n",
+                  ui_nrf_spectrum_ready() ? "OK (PSRAM buffer allocated)"
+                                          : "FAILED - canvas buffer alloc failed");
 }
 
 } /* extern "C" */
@@ -2516,6 +2557,14 @@ void process_serial_command(const String& cmd_in) {
     }
     else if (cmd == "dht11 status") {
         Serial.println(dht11_logging ? "DHT11 logging is ACTIVE." : "DHT11 logging is STOPPED.");
+        float t, h;
+        if (dht_read_cached(&t, &h, true)) {
+            Serial.printf("DHT11: %.1f C  %.1f %%RH  (GPIO%d, fails=%u)\n",
+                          t, h, DHTPIN, (unsigned)dht_fail_streak);
+        } else {
+            Serial.printf("DHT11: no reading (GPIO%d, fails=%u)\n",
+                          DHTPIN, (unsigned)dht_fail_streak);
+        }
     }
     else if (cmd == "fetch") {
         print_system_info();
@@ -2694,16 +2743,104 @@ void process_serial_command(const String& cmd_in) {
             Serial.println("usage: nrf sniff <0..125> | nrf sniff (hopping)");
         }
     }
+    else if (cmd == "nrf spectrum") {
+        uint8_t  vals[NRF_CH_NUM];
+        uint32_t seq = 0;
+        uint8_t  lo = 0, hi = NRF_CH_MAX, rate = 0;
+        uint16_t dw = 0;
+        nrf_get_spectrum(vals, NULL, &seq, NULL);
+        nrf_get_config(&lo, &hi, &dw, &rate);
+        int active = 0, peak_ch = -1, peak_val = 0;
+        for (int c = lo; c <= hi && c < NRF_CH_NUM; c++) {
+            if (vals[c] > 8) active++;
+            if (vals[c] > peak_val) { peak_val = vals[c]; peak_ch = c; }
+        }
+        Serial.printf("\nspectrum pass#%u  CH%d..%d  dwell=%ums  rate=%s\n",
+                      (unsigned)seq, lo, hi, (unsigned)dw,
+                      (rate == NRF_RATE_ALL) ? "cycling" : nrf_rate_name(rate));
+        Serial.printf("active(>3%%)=%d  peak=CH%d %u%%\n",
+                      active, peak_ch, (unsigned)(peak_val * 100u / 255u));
+        for (int c = lo; c <= hi && c < NRF_CH_NUM; c++) {
+            if (vals[c] <= 8) continue;
+            char bar[24];
+            int n = vals[c] * 20 / 255;
+            if (n < 1) n = 1;
+            for (int b = 0; b < 20; b++) bar[b] = (b < n) ? '#' : ' ';
+            bar[20] = '\0';
+            Serial.printf("  CH%-3d %3u%% |%s|\n", c,
+                          (unsigned)(vals[c] * 100u / 255u), bar);
+        }
+        if (active == 0) Serial.println("  (nothing above noise floor in this pass)");
+    }
+    else if (cmd == "nrf screen") {
+        // 远程把 nRF 屏拉起来（本命令在 LVGL 任务里执行，可以直接改界面）
+        _ui_screen_change(&ui_nrf, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_nrf_screen_init);
+        Serial.println("[nrf] screen opened");
+    }
+    else if (cmd == "nrf spec on" || cmd == "nrf spec off") {
+        ui_nrf_set_mode(cmd.endsWith("on"));
+        Serial.printf("[nrf] mode = %s  canvas=%s(list=%s)  canvas_hidden=%d list_hidden=%d\n",
+                      cmd.endsWith("on") ? "spectrum" : "packets",
+                      ui_nrf_spectrum_ready() ? "ready" : "NOT-ready",
+                      ui_nrf_canvas_hidden() ? "hidden" : "shown",
+                      (int)ui_nrf_canvas_hidden(), (int)ui_nrf_list_hidden());
+    }
     else if (cmd == "nrf stop") {
         nrf_sniffer_stop();
     }
     else if (cmd == "nrf status") {
         nrf_stats_t st;
         nrf_get_stats(&st);
-        Serial.printf("nrf: %s CH%d %s pkts=%u logged=%u\n",
+        Serial.printf("nrf: %s CH%d/%d-%d dwell=%ums rate=%s pkts=%u logged=%u\n",
                       !st.available ? "NO MODULE" : (st.active ? "LIVE" : "stopped"),
-                      (int)st.channel, nrf_rate_name(st.rate_idx),
+                      (int)st.channel, (int)st.min_ch, (int)st.max_ch,
+                      (unsigned)st.dwell_ms,
+                      (st.rate_mode == NRF_RATE_ALL) ? "cycling" : nrf_rate_name(st.rate_mode),
                       (unsigned)st.packets, (unsigned)nrf_logged_seq);
+    }
+    // 扫描窗口：nRF24 的 RF_CH 是 7 位，0..125 → 2400..2525MHz
+    else if (cmd.startsWith("nrf range")) {
+        int a = -1, b = -1;
+        if (sscanf(cmd.c_str(), "nrf range %d %d", &a, &b) == 2) {
+            if (nrf_set_range((uint8_t)a, (uint8_t)b)) {
+                nrf_stats_t st; nrf_get_stats(&st);
+                Serial.printf("[nrf] range CH%d..%d (%.0f..%.0f MHz), %d channels\n",
+                              a, b, 2400.0 + a, 2400.0 + b, b - a + 1);
+            } else {
+                Serial.println("nrf range: need 0<=min<=max<=125");
+            }
+        } else if (sscanf(cmd.c_str(), "nrf range %d", &a) == 1) {
+            // 单参数：CH a..125
+            if (nrf_set_range((uint8_t)a, NRF_CH_MAX))
+                Serial.printf("[nrf] range CH%d..%d\n", a, NRF_CH_MAX);
+            else Serial.println("nrf range: need 0<=min<=125");
+        } else {
+            Serial.println("usage: nrf range <min> <max>   (0..125, default 0..125)");
+        }
+    }
+    else if (cmd.startsWith("nrf dwell")) {
+        int ms = 0;
+        if (sscanf(cmd.c_str(), "nrf dwell %d", &ms) == 1) {
+            if (nrf_set_dwell((uint16_t)ms)) {
+                uint8_t lo, hi, rate; uint16_t dw;
+                nrf_get_config(&lo, &hi, &dw, &rate);
+                int nch = (int)hi - (int)lo + 1;
+                Serial.printf("[nrf] dwell %dms -> %d ch sweep %.2fs%s\n",
+                              ms, nch, nch * ms / 1000.0,
+                              (rate == NRF_RATE_ALL) ? " per rate (x3 for all)" : "");
+            } else {
+                Serial.println("nrf dwell: 5..2000 ms");
+            }
+        } else {
+            Serial.println("usage: nrf dwell <5..2000>   (default 200)");
+        }
+    }
+    else if (cmd.startsWith("nrf rate")) {
+        if (cmd.endsWith("1m"))        { nrf_set_rate_mode(NRF_RATE_1M);   Serial.println("[nrf] rate fixed 1M"); }
+        else if (cmd.endsWith("2m"))   { nrf_set_rate_mode(NRF_RATE_2M);   Serial.println("[nrf] rate fixed 2M"); }
+        else if (cmd.endsWith("250k")) { nrf_set_rate_mode(NRF_RATE_250K); Serial.println("[nrf] rate fixed 250K"); }
+        else if (cmd.endsWith("all"))  { nrf_set_rate_mode(NRF_RATE_ALL);  Serial.println("[nrf] rate cycling 1M/2M/250K"); }
+        else Serial.println("usage: nrf rate 1m | 2m | 250k | all");
     }
     else if (cmd == "nrf dump") {
         nrf_serial_dump();
@@ -2720,6 +2857,9 @@ void process_serial_command(const String& cmd_in) {
         Serial.println("rfmon start | stop | status | clear | dump");
         Serial.println("rfmon log on | off | status | tail");
         Serial.println("nrf sniff [ch] | stop | status | dump | clear");
+        Serial.println("nrf range <min> <max> | dwell <5..2000> | rate 1m|2m|250k|all");
+        Serial.println("nrf spectrum (ASCII dump of the last sweep)");
+        Serial.println("nrf screen | spec on|off");
         Serial.println("ls [dir] | cat <file> | stat <path> | rm <path>");
         Serial.println("fetch | date | reboot");
     }
@@ -2776,7 +2916,9 @@ void original_setup() {
     led.dirty = false;
 
     // DHT11 上电后需要约 1s 稳定
-    dht.begin();
+    if (!dht11_begin(DHTPIN)) {
+        Serial.printf("[dht] init FAILED on GPIO%d, sensor disabled\n", DHTPIN);
+    }
     delay(1100);
     last_dht_read_ms = 0;
 
@@ -2852,6 +2994,7 @@ void original_loop() {
     rfmon_poll_ui();   // 内部自带 500ms 节流 + 屏判空，未建屏时开销≈0
     rfmon_log_tick();  // 未在监听时第一句就 return（1s 节流之后才取快照）
     nrf_poll_ui();     // nRF24 嗅探屏：同样 500ms 节流 + 屏判空
+    nrf_spectrum_tick(); // 频谱视图：只在 Spec 页可见时才画（150ms 节流）
     nrf_log_tick();    // /nrf.csv 增量落盘：没新包第一句就 return
 
 #if ENABLE_BLE
