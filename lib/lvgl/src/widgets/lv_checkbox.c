@@ -74,14 +74,16 @@ void lv_checkbox_set_text(lv_obj_t * obj, const char * txt)
     size_t len = strlen(txt);
 #endif
 
-    if(!cb->static_txt) cb->txt = lv_mem_realloc(cb->txt, len + 1);
-    else  cb->txt = lv_mem_alloc(len + 1);
+    char * _txt = (char *)cb->txt;
+    if(!cb->static_txt) _txt = lv_mem_realloc(_txt, len + 1);
+    else _txt = lv_mem_alloc(len + 1);
 #if LV_USE_ARABIC_PERSIAN_CHARS
-    _lv_txt_ap_proc(txt, cb->txt);
+    _lv_txt_ap_proc(txt, _txt);
 #else
-    strcpy(cb->txt, txt);
+    strcpy(_txt, txt);
 #endif
 
+    cb->txt = _txt;
     cb->static_txt = 0;
 
     lv_obj_refresh_self_size(obj);
@@ -92,7 +94,7 @@ void lv_checkbox_set_text_static(lv_obj_t * obj, const char * txt)
 {
     lv_checkbox_t * cb = (lv_checkbox_t *)obj;
 
-    if(!cb->static_txt) lv_mem_free(cb->txt);
+    if(!cb->static_txt) lv_mem_free((void *)cb->txt);
 
     cb->txt = (char *)txt;
     cb->static_txt = 1;
@@ -122,7 +124,7 @@ static void lv_checkbox_constructor(const lv_obj_class_t * class_p, lv_obj_t * o
 
     lv_checkbox_t * cb = (lv_checkbox_t *)obj;
 
-    cb->txt = (char *)"Check box";
+    cb->txt = "Check box";
     cb->static_txt = 1;
     lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(obj, LV_OBJ_FLAG_CHECKABLE);
@@ -138,7 +140,7 @@ static void lv_checkbox_destructor(const lv_obj_class_t * class_p, lv_obj_t * ob
 
     lv_checkbox_t * cb = (lv_checkbox_t *)obj;
     if(!cb->static_txt) {
-        lv_mem_free(cb->txt);
+        lv_mem_free((void *)cb->txt);
         cb->txt = NULL;
     }
     LV_TRACE_OBJ_CREATE("finished");

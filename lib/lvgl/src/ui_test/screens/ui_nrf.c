@@ -75,7 +75,7 @@ static void nrf_build_clut(void)
         // 否则安静环境里 4% 的信道在屏幕上看不出来。
         float x = i / 255.0f;
         uint8_t gv = (uint8_t)(sqrtf(x) * 255.0f);
-        if (i > 0 && gv < 96) gv = 96;
+        if (i > 0 && gv < 72) gv = 72;
         nrf_gain[i] = gv;
     }
 }
@@ -139,10 +139,34 @@ bool ui_nrf_list_hidden(void)
     return ui_nrf_list == NULL || lv_obj_has_flag(ui_nrf_list, LV_OBJ_FLAG_HIDDEN);
 }
 
+// 网格：作为"标尺"画在数据之上（1px 细线，暗蓝灰），
+// 竖线每 52px 一格 = 时间刻度，横线每 20px 一格 ≈ 25 个信道。
+// 因为画布是按列滚动（memmove 左移 1px），网格必须每次重画，
+// 否则会跟着数据一起被拖走。11 条线 ≈ 2500 次写，开销可以忽略。
+static void nrf_draw_grid(void)
+{
+    if (nrf_cbuf == NULL) return;
+    lv_color_t gc = lv_color_make(44, 58, 88);
+    for (int x = 0; x < NRF_SPEC_W; x += 52)
+        for (int y = 0; y < NRF_SPEC_H; y++)
+            nrf_cbuf[(size_t)y * NRF_SPEC_W + x] = gc;
+    for (int y = 0; y < NRF_SPEC_H; y += 20)
+        for (int x = 0; x < NRF_SPEC_W; x++)
+            nrf_cbuf[(size_t)y * NRF_SPEC_W + x] = gc;
+}
+
 void ui_nrf_spectrum_push(const uint8_t * vals, uint8_t lo, uint8_t hi, bool commit)
 {
     if (nrf_cbuf == NULL || vals == NULL || !nrf_spectrum) return;
     if (hi < lo) return;
+
+    // 自动增益：RPD 命中率绝对值都很小（几 % 到几十 %），固定映射会全挤在
+    // 蓝色区段。按本列峰值归一化，最强的信道给到红端，其余按比例分级——
+    // 和 SDR 频谱图的自动对比度是一个思路。
+    int peak = 0;
+    for (int c = lo; c <= hi && c < UI_NRF_CH_NUM; c++)
+        if (vals[c] > peak) peak = vals[c];
+    if (peak < 24) peak = 24;              // 环境安静时不把噪声放大成满屏红
 
     // 频率向上递增：y=0 是最低行 → 最高频
     int span = (int)hi - (int)lo + 1;
@@ -150,7 +174,9 @@ void ui_nrf_spectrum_push(const uint8_t * vals, uint8_t lo, uint8_t hi, bool com
     for (int y = 0; y < NRF_SPEC_H; y++) {
         int ch = hi - (y * span) / NRF_SPEC_H;
         uint8_t v = (ch >= 0 && ch < UI_NRF_CH_NUM) ? vals[ch] : 0;
-        col[y] = nrf_clut[nrf_gain[v]];
+        int scaled = (int)v * 255 / peak;
+        if (scaled > 255) scaled = 255;
+        col[y] = nrf_clut[nrf_gain[scaled]];
     }
 
     if (commit && !nrf_spec_filled) {
@@ -174,6 +200,7 @@ void ui_nrf_spectrum_push(const uint8_t * vals, uint8_t lo, uint8_t hi, bool com
             nrf_cbuf[(size_t)y * NRF_SPEC_W + (NRF_SPEC_W - 1)] = col[y];
     }
 
+    nrf_draw_grid();
     lv_obj_invalidate(nrf_canvas);
 }
 

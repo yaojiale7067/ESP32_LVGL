@@ -1821,7 +1821,7 @@ static void IRAM_ATTR ws2812_rmt_adapter(const void* src, rmt_item32_t* dest,
 {
     if (src == NULL || dest == NULL) { *translated_size = 0; *item_num = 0; return; }
     const rmt_item32_t bit0 = {{{ WS2812_T0H_TICKS, 1, WS2812_T0L_TICKS, 0 }}};
-    const rmt_item32_t bit1 = {{{ WS2812_T1H_TICKS, 1, WS2812_T1L_TICKS, 0 }}};
+    const rmt_item32_t bit1 = {{{ WS2812_T1H_TICKS, 1, WS2812_T1L_TICKS, 0 }}}; 
     size_t size = 0, num = 0;
     const uint8_t* psrc = (const uint8_t*)src;
     rmt_item32_t* pdest = dest;
@@ -2767,8 +2767,8 @@ void process_serial_command(const String& cmd_in) {
             if (n < 1) n = 1;
             for (int b = 0; b < 20; b++) bar[b] = (b < n) ? '#' : ' ';
             bar[20] = '\0';
-            Serial.printf("  CH%-3d %3u%% |%s|\n", c,
-                          (unsigned)(vals[c] * 100u / 255u), bar);
+            Serial.printf("  CH%-3d %3u%% (raw %3u/255) |%s|\n", c,
+                          (unsigned)(vals[c] * 100u / 255u), (unsigned)vals[c], bar);
         }
         if (active == 0) Serial.println("  (nothing above noise floor in this pass)");
     }

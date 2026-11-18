@@ -252,9 +252,11 @@ static void nrf_task(void * arg) {
     uint32_t dwell_start = millis();
     uint16_t act_hits = 0, act_samples = 0;   // 当前信道的 RPD 命中/采样数
     while (s_active) {
-        // RPD 采样：接收状态下读到 1 表示此刻有 > -64dBm 的能量
-        if ((nrf_read_reg(REG_RPD) & 0x01) != 0) act_hits++;
-        act_samples++;
+        // RPD 采样：每个 1ms 片内连读 4 次，把量化台阶从 1/20 细化到 1/80
+        for (int k = 0; k < 4; k++) {
+            if ((nrf_read_reg(REG_RPD) & 0x01) != 0) act_hits++;
+            act_samples++;
+        }
 
         uint8_t status = nrf_read_reg(REG_STATUS);
         // RX FIFO 非空：pipe 号 3..7 表示空（nRF24L01+ 数据手册）
@@ -280,7 +282,15 @@ static void nrf_task(void * arg) {
                         ? (uint8_t)((uint32_t)act_hits * 255u / act_samples) : 0;
             act_hits = act_samples = 0;
             portENTER_CRITICAL(&s_mux);
-            if (ch < NRF_CH_NUM) s_act_live[ch] = lvl;
+            if (ch < NRF_CH_NUM) {
+                // nRF24 的 RPD 只在"真的收到包"时置位，拿不到连续底噪，
+                // 所以单次命中会表现为孤立亮点。这里做峰值保持 + 衰减：
+                // 新值取 max，旧值每轮掉 1/8，命中就会留下一条会淡出的痕迹，
+                // 视觉上才连成"瀑布"，而不是密密麻麻的小点。
+                uint8_t prev = s_act_live[ch];
+                uint8_t decayed = (prev > 6) ? (uint8_t)(prev - prev / 8u) : 0;
+                s_act_live[ch] = (lvl > decayed) ? lvl : decayed;
+            }
             portEXIT_CRITICAL(&s_mux);
 
             ch++;
@@ -361,6 +371,8 @@ void nrf_clear_stats(void) {
     portENTER_CRITICAL(&s_mux);
     bool avail = s_stats.available, act = s_stats.active;
     memset(&s_stats, 0, sizeof(s_stats));
+    memset(s_act, 0, sizeof(s_act));
+    memset(s_act_live, 0, sizeof(s_act_live));
     s_stats.available = avail;
     s_stats.active = act;
     s_stats.version = 1;

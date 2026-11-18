@@ -1,0 +1,15 @@
+
+--- boot done, sending commands ---
+[nrf] dwell 200ms -> full sweep 1 x 200ms = 0.2s
+[nrf] rate fixed 1M
+[nrf] nRF24L01+ handshake OK, promiscuous RX ready (passive, no TX)
+[nrf] sniffing CH0..125, dwell 200ms, 1M
+[nrf] started, 'nrf dump' for a snapshot
+nrf: LIVE CH100/0-125 dwell=200ms rate=1M pkts=0 logged=0
+
+=== nRF24 (LIVE) CH115 1M ===
+packets=0 (logged up to seq=0)
+range CH0..125 (2400..2525MHz), dwell 200ms, rate 1M
+==========================
+
+[nrf] stopped, 0 packets captured
