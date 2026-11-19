@@ -23,6 +23,8 @@ static lv_obj_t *   nrf_btn_pkts = NULL;
 static lv_obj_t *   nrf_btn_spec = NULL;
 static lv_obj_t *   nrf_canvas   = NULL;
 static lv_color_t * nrf_cbuf     = NULL;
+static uint8_t *    nrf_plane    = NULL;   // 活动度数据面（W*H），与画布分开
+static uint8_t      nrf_colpeak[NRF_SPEC_W];
 static bool         nrf_spectrum = false;
 static bool         nrf_spec_filled = false;   // 首屏是否已用整屏填充
 
@@ -139,68 +141,84 @@ bool ui_nrf_list_hidden(void)
     return ui_nrf_list == NULL || lv_obj_has_flag(ui_nrf_list, LV_OBJ_FLAG_HIDDEN);
 }
 
-// 网格：作为"标尺"画在数据之上（1px 细线，暗蓝灰），
-// 竖线每 52px 一格 = 时间刻度，横线每 20px 一格 ≈ 25 个信道。
-// 因为画布是按列滚动（memmove 左移 1px），网格必须每次重画，
-// 否则会跟着数据一起被拖走。11 条线 ≈ 2500 次写，开销可以忽略。
-static void nrf_draw_grid(void)
+// 网格：数据面之上的"静态"标尺。竖线每 52px（时间刻度），横线每 20px
+// （126 信道 / 5 ≈ 25 信道一格）。
+// ★ 之前把网格直接画进画布缓冲，而画布是整列左移的：每次提交都会把竖线
+//   连同数据一起挪 1px，然后再在旧位置重画一条 —— 于是竖线越拖越宽。
+//   现在数据单独放在 nrf_plane 里，画布每次【重新合成】（背景/网格/数据），
+//   网格位置永远是固定的，不会漂移，也不会叠加。
+static inline bool nrf_is_grid(int x, int y)
 {
-    if (nrf_cbuf == NULL) return;
-    lv_color_t gc = lv_color_make(44, 58, 88);
-    for (int x = 0; x < NRF_SPEC_W; x += 52)
-        for (int y = 0; y < NRF_SPEC_H; y++)
-            nrf_cbuf[(size_t)y * NRF_SPEC_W + x] = gc;
-    for (int y = 0; y < NRF_SPEC_H; y += 20)
+    return (x % 52) == 0 || (y % 20) == 0;
+}
+
+static lv_color_t nrf_cell_color(int x, int y)
+{
+    uint8_t v = nrf_plane[(size_t)y * NRF_SPEC_W + x];
+    if (v != 0) {
+        int peak = nrf_colpeak[x] < 24 ? 24 : nrf_colpeak[x];
+        int scaled = (int)v * 255 / peak;
+        if (scaled > 255) scaled = 255;
+        return nrf_clut[nrf_gain[scaled]];
+    }
+    return nrf_is_grid(x, y) ? lv_color_make(44, 58, 88)
+                             : lv_color_make(8, 10, 16);
+}
+
+static void nrf_compose_col(int x)
+{
+    for (int y = 0; y < NRF_SPEC_H; y++)
+        nrf_cbuf[(size_t)y * NRF_SPEC_W + x] = nrf_cell_color(x, y);
+}
+
+static void nrf_compose_all(void)
+{
+    for (int y = 0; y < NRF_SPEC_H; y++)
         for (int x = 0; x < NRF_SPEC_W; x++)
-            nrf_cbuf[(size_t)y * NRF_SPEC_W + x] = gc;
+            nrf_cbuf[(size_t)y * NRF_SPEC_W + x] = nrf_cell_color(x, y);
 }
 
 void ui_nrf_spectrum_push(const uint8_t * vals, uint8_t lo, uint8_t hi, bool commit)
 {
-    if (nrf_cbuf == NULL || vals == NULL || !nrf_spectrum) return;
+    if (nrf_cbuf == NULL || nrf_plane == NULL || vals == NULL || !nrf_spectrum) return;
     if (hi < lo) return;
 
-    // 自动增益：RPD 命中率绝对值都很小（几 % 到几十 %），固定映射会全挤在
-    // 蓝色区段。按本列峰值归一化，最强的信道给到红端，其余按比例分级——
-    // 和 SDR 频谱图的自动对比度是一个思路。
     int peak = 0;
     for (int c = lo; c <= hi && c < UI_NRF_CH_NUM; c++)
         if (vals[c] > peak) peak = vals[c];
-    if (peak < 24) peak = 24;              // 环境安静时不把噪声放大成满屏红
+    if (peak < 24) peak = 24;
 
     // 频率向上递增：y=0 是最低行 → 最高频
     int span = (int)hi - (int)lo + 1;
-    lv_color_t col[NRF_SPEC_H];
+    uint8_t col[NRF_SPEC_H];
     for (int y = 0; y < NRF_SPEC_H; y++) {
         int ch = hi - (y * span) / NRF_SPEC_H;
-        uint8_t v = (ch >= 0 && ch < UI_NRF_CH_NUM) ? vals[ch] : 0;
-        int scaled = (int)v * 255 / peak;
-        if (scaled > 255) scaled = 255;
-        col[y] = nrf_clut[nrf_gain[scaled]];
+        col[y] = (ch >= 0 && ch < UI_NRF_CH_NUM) ? vals[ch] : 0;
     }
 
     if (commit && !nrf_spec_filled) {
-        // 第一轮扫完：把整屏都铺成这一列。
-        // 否则要等 312 轮（dwell 20ms 时 13 分钟）画面才长满，看起来像"没有频谱"。
-        for (int y = 0; y < NRF_SPEC_H; y++) {
-            lv_color_t * row = nrf_cbuf + (size_t)y * NRF_SPEC_W;
-            for (int x = 0; x < NRF_SPEC_W; x++) row[x] = col[y];
-        }
-        nrf_spec_filled = true;
-    } else {
-        if (commit) {
-            // 完成一轮：整屏左移一列，空出最右边一列
-            for (int y = 0; y < NRF_SPEC_H; y++) {
-                lv_color_t * row = nrf_cbuf + (size_t)y * NRF_SPEC_W;
-                memmove(row, row + 1, (NRF_SPEC_W - 1) * sizeof(lv_color_t));
-                row[NRF_SPEC_W - 1] = nrf_clut[0];
-            }
-        }
         for (int y = 0; y < NRF_SPEC_H; y++)
-            nrf_cbuf[(size_t)y * NRF_SPEC_W + (NRF_SPEC_W - 1)] = col[y];
+            for (int x = 0; x < NRF_SPEC_W; x++)
+                nrf_plane[(size_t)y * NRF_SPEC_W + x] = col[y];
+        for (int x = 0; x < NRF_SPEC_W; x++) nrf_colpeak[x] = (uint8_t)peak;
+        nrf_spec_filled = true;
+        nrf_compose_all();
+    } else if (commit) {
+        for (int y = 0; y < NRF_SPEC_H; y++)
+            memmove(nrf_plane + (size_t)y * NRF_SPEC_W,
+                    nrf_plane + (size_t)y * NRF_SPEC_W + 1, NRF_SPEC_W - 1);
+        memmove(nrf_colpeak, nrf_colpeak + 1, NRF_SPEC_W - 1);
+        for (int y = 0; y < NRF_SPEC_H; y++)
+            nrf_plane[(size_t)y * NRF_SPEC_W + (NRF_SPEC_W - 1)] = col[y];
+        nrf_colpeak[NRF_SPEC_W - 1] = (uint8_t)peak;
+        nrf_compose_all();          // 整屏重合成：网格永远固定，不会拖宽
+    } else {
+        for (int y = 0; y < NRF_SPEC_H; y++)
+            nrf_plane[(size_t)y * NRF_SPEC_W + (NRF_SPEC_W - 1)] = col[y];
+        nrf_colpeak[NRF_SPEC_W - 1] = (uint8_t)peak;
+        nrf_compose_col(NRF_SPEC_W - 1);
     }
 
-    nrf_draw_grid();
     lv_obj_invalidate(nrf_canvas);
 }
 
@@ -256,12 +274,19 @@ void ui_nrf_screen_init(void)
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (nrf_cbuf != NULL) {
         memset(nrf_cbuf, 0, (size_t)NRF_SPEC_W * NRF_SPEC_H * sizeof(lv_color_t));
+        nrf_plane = (uint8_t *)heap_caps_malloc((size_t)NRF_SPEC_W * NRF_SPEC_H,
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (nrf_plane != NULL) {
+            memset(nrf_plane, 0, (size_t)NRF_SPEC_W * NRF_SPEC_H);
+            memset(nrf_colpeak, 0, sizeof(nrf_colpeak));
+        }
         nrf_canvas = lv_canvas_create(ui_nrf);
         lv_canvas_set_buffer(nrf_canvas, nrf_cbuf, NRF_SPEC_W, NRF_SPEC_H,
                              LV_IMG_CF_TRUE_COLOR);
         lv_obj_align(nrf_canvas, LV_ALIGN_TOP_LEFT, UIK_LEFT, NRF_LIST_Y);
         lv_obj_clear_flag(nrf_canvas, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_flag(nrf_canvas, LV_OBJ_FLAG_HIDDEN);
+        if (nrf_plane != NULL) nrf_compose_all();   // 先铺背景 + 网格
     }
 
     ui_nrf_status_label = uik_status_bar(ui_nrf);
@@ -417,6 +442,7 @@ void ui_nrf_screen_destroy(void)
     nrf_btn_spec = NULL;
     nrf_canvas = NULL;
     if (nrf_cbuf) { heap_caps_free(nrf_cbuf); nrf_cbuf = NULL; }
+    if (nrf_plane) { heap_caps_free(nrf_plane); nrf_plane = NULL; }
     nrf_spectrum = false;
     for (int i = 0; i < 4; i++) {
         nrf_val[i] = NULL;

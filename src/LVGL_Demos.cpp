@@ -34,6 +34,8 @@
 #include "ui_test/screens/ui_nrf.h"          // nRF24 嗅探屏（2.4G 私有协议，被动）
 #include "rf_monitor.h"                      // 被动监听数据层（只收不发）
 #include "nrf24.h"                           // nRF24L01+ 嗅探数据层（只收不发）
+#include "cc1101.h"                          // CC1101 Sub-GHz 扫频（真实 RSSI）
+#include "ui_test/screens/ui_cc.h"           // CC1101 扫频屏
 #if ENABLE_BLE
 #include "ui_test/screens/ui_ble.h"
 #endif
@@ -2401,6 +2403,175 @@ void ui_nrf_on_screen_ready(void) {
 } /* extern "C" */
 
 
+// ============================================================================
+//  CC1101 Sub-GHz 扫频（数据层在 src/cc1101.cpp）
+//  ----------------------------------------------------------------------------
+//  和 nRF24 屏同一套节奏：500ms 节流刷新四格与标题，150ms 推一列频谱。
+//  CC1101 读的是真实 RSSI（dBm），所以色阶是绝对功率映射，不需要自动增益。
+// ============================================================================
+static unsigned long cc_last_poll = 0;
+static unsigned long cc_spec_last = 0;
+static uint32_t      cc_spec_pass = 0xFFFFFFFFu;
+static unsigned long cc_last_log  = 0;
+static uint32_t      cc_logged_seq = 0;      // 已落盘的最大 seq
+
+static void cc_poll_ui() {
+    if (ui_cc == NULL) return;
+    if (millis() - cc_last_poll < 500) return;
+    cc_last_poll = millis();
+
+    bool avail = cc1101_available();
+    bool pkts  = (cc1101_mode() == CC_MODE_PKTS);
+
+    if (pkts) {
+        cc_pkt_t pk[CC_MAX_PKTS];
+        uint8_t cnt = 0; uint32_t ver = 0, total = 0;
+        cc1101_get_pkts(pk, &cnt, &ver, &total);
+        ui_cc_entry_t ent[UI_CC_MAX_ROWS];
+        int n = cnt > UI_CC_MAX_ROWS ? UI_CC_MAX_ROWS : cnt;
+        for (int i = 0; i < n; i++) {
+            char hex[40];
+            int hl = pk[i].len > 12 ? 12 : pk[i].len;
+            int pos = 0;
+            for (int b = 0; b < hl; b++)
+                pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X", pk[i].data[b]);
+            if (pk[i].len > 12 && pos + 1 < (int)sizeof(hex)) { hex[pos++] = '.'; hex[pos] = '\0'; }
+            snprintf(ent[i].name, sizeof(ent[i].name), "#%u %s", (unsigned)pk[i].seq, hex);
+            snprintf(ent[i].right, sizeof(ent[i].right), "%ddB L%u",
+                     (int)pk[i].rssi, (unsigned)pk[i].lqi);
+        }
+        ui_cc_set_list(ver, n, ent);
+        ui_cc_set_running(cc1101_active(), avail);
+        ui_cc_set_stats(pk[0].rssi, cc1101_rx_mhz(), pk[0].rssi, avail);
+
+        char hdr[56];
+        if (!avail) {
+            ui_cc_set_header("NO MODULE " LV_SYMBOL_BULLET " check CSN=5 / SPI", UIK_C_ERR_TEXT);
+            ui_cc_set_status("CSN5 + SCK16 MISO17 MOSI18, VCC=3.3V", UIK_C_WARN_TEXT);
+        } else {
+            snprintf(hdr, sizeof(hdr), "RX %.3fMHz " LV_SYMBOL_BULLET " %u pkts",
+                     (double)cc1101_rx_mhz(), (unsigned)total);
+            ui_cc_set_header(hdr, total ? UIK_C_OK_TEXT : UIK_C_TEXT_DIM);
+            snprintf(hdr, sizeof(hdr), "%s " LV_SYMBOL_BULLET " /cc.csv",
+                     cc1101_active() ? "Listening" : "Stopped");
+            ui_cc_set_status(hdr, cc1101_active() ? UIK_C_OK_TEXT : UIK_C_TEXT_DIM);
+        }
+        return;
+    }
+
+    int8_t dbm[UI_CC_STEPS];
+    uint32_t pass = 0;
+    uint8_t cur_step = 0;
+    int8_t cur_dbm = -127;
+    float lo = CC_DEFAULT_MIN, hi = CC_DEFAULT_MAX;
+    cc1101_get_scan(dbm, &pass, &cur_step, &cur_dbm, &lo, &hi);
+
+    int8_t peak = -127;
+    for (int i = 0; i < UI_CC_STEPS; i++) if (dbm[i] > peak) peak = dbm[i];
+    float cur_mhz = lo + (hi - lo) * cur_step / (UI_CC_STEPS - 1);
+
+    ui_cc_set_running(cc1101_active(), avail);
+    ui_cc_set_stats(peak, cur_mhz, cur_dbm, avail);
+
+    char hdr[56];
+    if (!avail) {
+        ui_cc_set_header("NO MODULE " LV_SYMBOL_BULLET " check CSN=5 / SPI", UIK_C_ERR_TEXT);
+        ui_cc_set_status("CSN5 + SCK16 MISO17 MOSI18, VCC=3.3V", UIK_C_WARN_TEXT);
+    } else if (cc1101_active()) {
+        snprintf(hdr, sizeof(hdr), "SWEEP %.1f-%.1fMHz " LV_SYMBOL_BULLET " %u",
+                 (double)lo, (double)hi, (unsigned)pass);
+        ui_cc_set_header(hdr, peak > -80 ? UIK_C_OK_TEXT : UIK_C_TEXT_DIM);
+        snprintf(hdr, sizeof(hdr), "Scanning %d pts " LV_SYMBOL_BULLET " RX only", UI_CC_STEPS);
+        ui_cc_set_status(hdr, UIK_C_OK_TEXT);
+    } else {
+        snprintf(hdr, sizeof(hdr), "STOPPED " LV_SYMBOL_BULLET " %u sweeps", (unsigned)pass);
+        ui_cc_set_header(hdr, UIK_C_TEXT_DIM);
+        ui_cc_set_status("Idle " LV_SYMBOL_BULLET " tap Scan to sweep", UIK_C_TEXT_DIM);
+    }
+}
+
+// 收包落盘 /cc.csv（按 seq 增量）
+static void cc_log_tick() {
+    unsigned long now = millis();
+    if (now - cc_last_log < 1000) return;
+    cc_last_log = now;
+    if (!sd_initialized) return;
+    if (cc1101_mode() != CC_MODE_PKTS) return;
+
+    cc_pkt_t pk[CC_MAX_PKTS];
+    uint8_t cnt = 0; uint32_t ver = 0, total = 0;
+    cc1101_get_pkts(pk, &cnt, &ver, &total);
+    if (cnt == 0 || pk[0].seq <= cc_logged_seq) return;
+
+    SD_LOCK();
+    bool isNew = !SD.exists("/cc.csv");
+    File f = SD.open("/cc.csv", FILE_APPEND);
+    if (!f) { SD_UNLOCK(); return; }
+    if (isNew) f.println("ts_s,seq,mhz,rssi,lqi,len,hex");
+    for (int i = cnt - 1; i >= 0; i--) {
+        if (pk[i].seq <= cc_logged_seq) continue;
+        char hex[CC_PKT_MAX * 2 + 1];
+        int pos = 0;
+        for (int b = 0; b < pk[i].len; b++) pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X", pk[i].data[b]);
+        f.printf("%lu,%u,%.3f,%d,%u,%u,%s\n", now / 1000, (unsigned)pk[i].seq,
+                 (double)cc1101_rx_mhz(), (int)pk[i].rssi, (unsigned)pk[i].lqi,
+                 (unsigned)pk[i].len, hex);
+        if (pk[i].seq > cc_logged_seq) cc_logged_seq = pk[i].seq;
+    }
+    f.close();
+    SD_UNLOCK();
+}
+
+static void cc_spectrum_tick() {
+    if (ui_cc == NULL) return;
+    if (millis() - cc_spec_last < 150) return;
+    cc_spec_last = millis();
+
+    int8_t dbm[UI_CC_STEPS];
+    uint32_t pass = 0;
+    float lo = CC_DEFAULT_MIN, hi = CC_DEFAULT_MAX;
+    cc1101_get_scan(dbm, &pass, NULL, NULL, &lo, &hi);
+
+    bool commit = false;
+    if (pass != cc_spec_pass) { cc_spec_pass = pass; commit = true; }
+    ui_cc_spectrum_push(dbm, lo, hi, commit);
+}
+
+extern "C" {
+
+void ui_cc_on_toggle(void) {
+    if (cc1101_active()) {
+        cc1101_stop();
+    } else if (!cc1101_init()) {
+        Serial.println("[cc1101] not detected — 'cc status' for diagnostics");
+    } else {
+        cc1101_start();
+    }
+    cc_last_poll = 0;
+    cc_poll_ui();
+}
+
+void ui_cc_on_screen_ready(void) {
+    cc_last_poll = 0;
+    cc_spec_pass = 0xFFFFFFFFu;
+    cc_poll_ui();
+    Serial.printf("[cc1101] screen ready, spectrum canvas %s\n",
+                  ui_cc_spectrum_ready() ? "OK (PSRAM buffers allocated)" : "FAILED");
+}
+
+void ui_cc_on_mode(bool pkts) {
+    ui_cc_set_mode(pkts);
+    cc1101_set_mode(pkts ? CC_MODE_PKTS : CC_MODE_SWEEP);
+    if (cc1101_active()) { cc1101_stop(); cc1101_start(); }
+    cc_last_poll = 0;
+    cc_spec_pass = 0xFFFFFFFFu;
+    cc_poll_ui();
+    Serial.printf("[cc1101] mode = %s\n", pkts ? "packets" : "sweep");
+}
+
+} /* extern "C" */
+
+
 // 系统信息 / 时间 / 串口命令
 void print_system_info() {
     Serial.println("\n========================================");
@@ -2785,6 +2956,104 @@ void process_serial_command(const String& cmd_in) {
                       ui_nrf_canvas_hidden() ? "hidden" : "shown",
                       (int)ui_nrf_canvas_hidden(), (int)ui_nrf_list_hidden());
     }
+    else if (cmd == "cc start" || cmd == "cc scan") {
+        if (!cc1101_init()) {
+            Serial.println("[cc1101] not detected (CSN=5, SCK16/MISO17/MOSI18, 3.3V)");
+        } else {
+            cc1101_start();
+            Serial.println("[cc1101] sweeping");
+        }
+    }
+    else if (cmd.startsWith("cc range")) {
+        float a = 0, b = 0;
+        if (sscanf(cmd.c_str(), "cc range %f %f", &a, &b) == 2) {
+            if (cc1101_set_range(a, b))
+                Serial.printf("[cc1101] range %.1f..%.1f MHz\n", (double)a, (double)b);
+            else
+                Serial.println("cc range: 300-348 | 387-464 | 779-928 MHz");
+        } else {
+            Serial.println("usage: cc range <minMhz> <maxMhz>");
+        }
+    }
+    else if (cmd == "cc status") {
+        int8_t dbm[UI_CC_STEPS];
+        uint32_t pass = 0; uint8_t step = 0; int8_t cur = -127;
+        float lo = 0, hi = 0;
+        cc1101_get_scan(dbm, &pass, &step, &cur, &lo, &hi);
+        int8_t peak = -127; int peak_i = 0;
+        for (int i = 0; i < UI_CC_STEPS; i++) if (dbm[i] > peak) { peak = dbm[i]; peak_i = i; }
+        Serial.printf("cc1101: %s  %.1f..%.1f MHz  sweeps=%u  cur=%.1fMHz %ddBm  peak=%ddBm @ %.1f MHz\n",
+                      !cc1101_available() ? "NO MODULE" : (cc1101_active() ? "SWEEPING" : "stopped"),
+                      (double)lo, (double)hi, (unsigned)pass,
+                      (double)(lo + (hi - lo) * step / (UI_CC_STEPS - 1)), (int)cur,
+                      (int)peak, (double)(lo + (hi - lo) * peak_i / (UI_CC_STEPS - 1)));
+    }
+    else if (cmd == "cc spectrum") {
+        int8_t dbm[UI_CC_STEPS];
+        uint32_t pass = 0; float lo = 0, hi = 0;
+        cc1101_get_scan(dbm, &pass, NULL, NULL, &lo, &hi);
+        Serial.printf("\ncc1101 sweep#%u  %.1f..%.1f MHz  %d pts\n",
+                      (unsigned)pass, (double)lo, (double)hi, UI_CC_STEPS);
+        for (int i = 0; i < UI_CC_STEPS; i += 8) {
+            float mhz = lo + (hi - lo) * i / (UI_CC_STEPS - 1);
+            Serial.printf("  %7.1fMHz %4ddBm |", (double)mhz, (int)dbm[i]);
+            int n = (dbm[i] + 110) * 20 / 80;
+            if (n < 0) n = 0; if (n > 20) n = 20;
+            for (int b = 0; b < 20; b++) Serial.print(b < n ? '#' : ' ');
+            Serial.println("|");
+        }
+    }
+    else if (cmd == "cc pkts") {
+        if (!cc1101_init()) {
+            Serial.println("[cc1101] not detected");
+        } else {
+            cc1101_set_mode(CC_MODE_PKTS);
+            if (cc1101_active()) { cc1101_stop(); cc1101_start(); }
+            Serial.printf("[cc1101] packet RX at %.3f MHz ('cc rx <mhz>' to retune)\n",
+                          (double)cc1101_rx_mhz());
+        }
+    }
+    else if (cmd == "cc spec") {
+        cc1101_set_mode(CC_MODE_SWEEP);
+        if (cc1101_active()) { cc1101_stop(); cc1101_start(); }
+        Serial.println("[cc1101] mode = RSSI sweep");
+    }
+    else if (cmd.startsWith("cc rx ")) {
+        float m = 0;
+        if (sscanf(cmd.c_str(), "cc rx %f", &m) == 1) {
+            if (cc1101_set_rx_mhz(m)) {
+                if (cc1101_mode() == CC_MODE_PKTS) {
+                    if (cc1101_active()) { cc1101_stop(); cc1101_start(); }
+                }
+                Serial.printf("[cc1101] RX %.3f MHz\n", (double)m);
+            } else {
+                Serial.println("cc rx: 300-348 | 387-464 | 779-928 MHz");
+            }
+        } else {
+            Serial.println("usage: cc rx <MHz>");
+        }
+    }
+    else if (cmd == "cc dump") {
+        cc_pkt_t pk[CC_MAX_PKTS];
+        uint8_t cnt = 0; uint32_t ver = 0, total = 0;
+        cc1101_get_pkts(pk, &cnt, &ver, &total);
+        Serial.printf("\ncc1101 packets total=%u (logged up to %u) @ %.3f MHz\n",
+                      (unsigned)total, (unsigned)cc_logged_seq, (double)cc1101_rx_mhz());
+        for (int i = 0; i < cnt; i++) {
+            Serial.printf("  #%u %ddBm LQI=%u len=%u : ", (unsigned)pk[i].seq,
+                          (int)pk[i].rssi, (unsigned)pk[i].lqi, (unsigned)pk[i].len);
+            for (int b = 0; b < pk[i].len; b++) Serial.printf("%02X", pk[i].data[b]);
+            Serial.println();
+        }
+        if (cnt == 0) Serial.println("  (none yet)");
+    }
+    else if (cmd == "cc stop") {
+        cc1101_stop();
+    }
+    else if (cmd == "cc screen") {
+        _ui_screen_change(&ui_cc, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_cc_screen_init);
+        Serial.println("[cc1101] screen opened");
+    }
     else if (cmd == "nrf stop") {
         nrf_sniffer_stop();
     }
@@ -2860,6 +3129,8 @@ void process_serial_command(const String& cmd_in) {
         Serial.println("nrf range <min> <max> | dwell <5..2000> | rate 1m|2m|250k|all");
         Serial.println("nrf spectrum (ASCII dump of the last sweep)");
         Serial.println("nrf screen | spec on|off");
+        Serial.println("cc scan | stop | status | spectrum | range <min> <max> | screen");
+        Serial.println("cc pkts | spec | rx <MHz> | dump");
         Serial.println("ls [dir] | cat <file> | stat <path> | rm <path>");
         Serial.println("fetch | date | reboot");
     }
@@ -2995,6 +3266,9 @@ void original_loop() {
     rfmon_log_tick();  // 未在监听时第一句就 return（1s 节流之后才取快照）
     nrf_poll_ui();     // nRF24 嗅探屏：同样 500ms 节流 + 屏判空
     nrf_spectrum_tick(); // 频谱视图：只在 Spec 页可见时才画（150ms 节流）
+    cc_poll_ui();        // CC1101 扫频屏：500ms 节流
+    cc_spectrum_tick();  // CC1101 频谱列：150ms 节流
+    cc_log_tick();       // /cc.csv 增量落盘
     nrf_log_tick();    // /nrf.csv 增量落盘：没新包第一句就 return
 
 #if ENABLE_BLE

@@ -29,6 +29,7 @@
 #include "ui_led.h"      // ui_led / ui_led_screen_init
 #include "ui_rfmon.h"    // ui_rfmon / ui_rfmon_screen_init
 #include "ui_nrf.h"      // ui_nrf / ui_nrf_screen_init
+#include "ui_cc.h"       // ui_cc / ui_cc_screen_init
 #if ENABLE_BLE
 #include "ui_ble.h"      // ui_ble / ble_set_prev_screen
 #endif
@@ -55,6 +56,8 @@ static lv_obj_t * ui_ButtonRfmon = NULL;  // RF Monitor（802.11 被动监听）
 static lv_obj_t * ui_LabelRfmon = NULL;
 static lv_obj_t * ui_ButtonNrf = NULL;    // nRF24（2.4G 私有协议被动嗅探）
 static lv_obj_t * ui_LabelNrf = NULL;
+static lv_obj_t * ui_ButtonCc = NULL;     // CC1101（Sub-GHz 扫频，真实 RSSI）
+static lv_obj_t * ui_LabelCc = NULL;
 static lv_obj_t * menu_cont = NULL;       // 可滚动菜单容器
 
 // ---- 菜单行的点击处理（统一用无动画切换，视觉上更干净）--------------------
@@ -98,6 +101,11 @@ static void go_nrf_cb(lv_event_t * e)
 {
     (void)e;
     _ui_screen_change(&ui_nrf, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_nrf_screen_init);
+}
+static void go_cc_cb(lv_event_t * e)
+{
+    (void)e;
+    _ui_screen_change(&ui_cc, LV_SCR_LOAD_ANIM_NONE, 0, 0, &ui_cc_screen_init);
 }
 
 // 注意：本文件按 C 编译，**不能用 lambda**，回调必须是普通静态函数
@@ -245,8 +253,14 @@ void ui_Screen1_screen_init(void)
                                      UIK_ACCENT_NRF, UIK_C_SURFACE,
                                      go_nrf_cb, NULL, &ui_LabelNrf);
 
-    uic_Screen1 = ui_Screen1;
-}
+    // CC1101 —— Sub-GHz 扫频，青蓝身份色。CC1101 有真实 RSSI 寄存器，
+    // 能画出真正的功率频谱。接线 CSN5，SPI 与 nRF24 共用 16/17/18。
+    ui_ButtonCc = uik_menu_row_icon(menu_cont, 0, 0, MENU_ROW_W, UIK_ROW_H,
+                                    LV_SYMBOL_WIFI, "CC1101 Sweep",
+                                    UIK_ACCENT_CC, UIK_C_SURFACE,
+                                    go_cc_cb, NULL, &ui_LabelCc);
+
+    uic_Screen1 = ui_Screen1;}
 
 void ui_Screen1_screen_destroy(void)
 {
@@ -273,5 +287,7 @@ void ui_Screen1_screen_destroy(void)
     ui_LabelRfmon = NULL;
     ui_ButtonNrf = NULL;
     ui_LabelNrf = NULL;
+    ui_ButtonCc = NULL;
+    ui_LabelCc = NULL;
     menu_cont = NULL;
 }

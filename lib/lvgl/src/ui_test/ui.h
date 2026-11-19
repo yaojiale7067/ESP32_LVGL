@@ -28,6 +28,7 @@ extern "C" {
 #include "screens/ui_led.h"     // WS2812 灯带控制：懒创建，见 ui.c 的说明
 #include "screens/ui_rfmon.h"   // RF Monitor（802.11 被动监听）：懒创建
 #include "screens/ui_nrf.h"     // nRF24 嗅探（2.4G 私有协议，被动）：懒创建
+#include "screens/ui_cc.h"      // CC1101 Sub-GHz 扫频（真实 RSSI）：懒创建
 
 ///////////////////// VARIABLES ////////////////////
 

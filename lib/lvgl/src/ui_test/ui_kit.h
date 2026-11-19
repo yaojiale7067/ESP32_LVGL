@@ -67,6 +67,7 @@ extern "C" {
 #define UIK_ACCENT_CHIP    0xE07A7A   // 片内温度：暖红
 #define UIK_ACCENT_MON     0xD65DB1   // RF Monitor：品红
 #define UIK_ACCENT_NRF     0xC8B83C   // nRF24：橄榄金
+#define UIK_ACCENT_CC      0x3CA8C8   // CC1101：青蓝（Sub-GHz 身份色）
 
 // ---------------- 字体 ----------------
 LV_FONT_DECLARE(ui_font_cjk12)
