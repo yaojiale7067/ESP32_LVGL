@@ -37,7 +37,7 @@ extern "C" {
 #define UIK_C_SURFACE    0x262626   // 面板 / 卡片 / 输入框
 #define UIK_C_SURFACE_HI 0x333333   // 按下态、列表选中底
 #define UIK_C_SUNKEN     0x0F0F0F   // 凹陷：终端 / 接收区底色
-#define UIK_C_BORDER     0x343434   // 分隔线 / 面板描边
+#define UIK_C_BORDER     0x592E96   // 分隔线 / 面板描边（暗紫色）
 #define UIK_C_DARK       UIK_C_SUNKEN   // 旧名，保留兼容
 
 // ---------------- 语义色 ----------------
@@ -67,7 +67,8 @@ extern "C" {
 #define UIK_ACCENT_CHIP    0xE07A7A   // 片内温度：暖红
 #define UIK_ACCENT_MON     0xD65DB1   // RF Monitor：品红
 #define UIK_ACCENT_NRF     0xC8B83C   // nRF24：橄榄金
-#define UIK_ACCENT_CC      0x3CA8C8   // CC1101：青蓝（Sub-GHz 身份色）
+#define UIK_ACCENT_CC      0x592E96   // CC1101：暗紫色（Sub-GHz 身份色）
+
 
 // ---------------- 字体 ----------------
 LV_FONT_DECLARE(ui_font_cjk12)
